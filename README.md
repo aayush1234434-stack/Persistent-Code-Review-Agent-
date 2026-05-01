@@ -1,6 +1,141 @@
 # Persistent Code Review Agent
 
-An AI-assisted GitHub pull request review service with persistent memory, deterministic checks, human feedback, reruns, checkpoint history, and a triage dashboard.
+# Persistent Code Review Agent
+
+An automated code review agent that analyzes pull requests, detects issues, and generates structured review feedback with severity ranking.
+
+---
+
+## 🚀 Problem
+
+Code reviews are:
+Time-consuming
+Inconsistent across reviewers
+Prone to missing critical issues (e.g., security flaws, bad practices)
+
+---
+
+## 💡 Solution
+
+This project implements a **persistent code review agent** that:
+
+* Parses pull request diffs
+* Analyzes code for issues
+* Assigns severity levels
+* Generates structured review comments
+
+---
+
+## 🧠 How It Works
+
+Pipeline:
+
+PR Diff
+→ Parser
+→ Context Builder
+→ Issue Detector
+→ Severity Scorer
+→ Review Generator
+
+---
+
+## 🔍 Features
+
+* ✅ Detects common issues (security, bad practices, policy violations)
+* 📊 Severity classification (HIGH / MEDIUM / LOW)
+* 🧪 Benchmark test cases included
+* 🐳 Docker support
+* 📈 Extensible architecture
+
+---
+
+## 📦 Example
+
+### Input (PR diff)
+
+```diff
+password = "123456"
+```
+
+### Output
+
+* 🔴 HIGH: Hardcoded secret detected
+  → Storing credentials directly in code is insecure
+
+---
+
+## 🧪 Benchmarks
+
+| Case                  | Issues Detected |
+| --------------------- | --------------- |
+| Hardcoded Secret      | ✅               |
+| Repo Policy Violation | ✅               |
+| Clean Refactor        | No issues       |
+
+---
+
+## 🛠️ Installation
+
+```bash
+git clone https://github.com/aayush1234434-stack/Persistent-Code-Review-Agent-.git
+cd Persistent-Code-Review-Agent-
+pip install -r requirements.txt
+```
+
+---
+
+## ▶️ Usage
+
+```bash
+python main.py --pr-file benchmarks/prs/hardcoded_secret.json
+```
+
+---
+
+## 🐳 Run with Docker
+
+```bash
+docker-compose up --build
+```
+
+---
+
+## 🧩 Project Structure
+
+```text
+agent.py              # Core agent logic  
+main.py               # Entry point  
+benchmarks/           # Test cases  
+tests/                # Unit tests  
+migrations/           # DB schema  
+```
+
+---
+
+## 📈 Future Improvements
+
+* Integration with GitHub PR API
+* Real-time PR commenting
+* Advanced LLM-based analysis
+* Multi-agent review system
+
+---
+
+## 🎯 Why This Matters
+
+This project demonstrates:
+
+* System design for AI agents
+* Code analysis pipelines
+* Structured output generation
+* Real-world problem solving
+
+---
+
+## 👤 Author
+
+Aayush Singh
+
 
 The agent listens to GitHub PR webhooks, analyzes changed diffs with a staged review pipeline, stores review state in Postgres, and lets reviewers approve, rerun, mark findings, and post final GitHub review comments.
 
