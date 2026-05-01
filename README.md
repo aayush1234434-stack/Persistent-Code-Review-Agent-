@@ -8,10 +8,9 @@ An automated code review agent that analyzes pull requests, detects issues, and 
 
 ## 🚀 Problem
 
-Code reviews are:
-Time-consuming
-Inconsistent across reviewers
-Prone to missing critical issues (e.g., security flaws, bad practices)
+- Time-consuming  
+- Inconsistent across reviewers  
+- Prone to missing critical issues (e.g., security flaws, bad practices) 
 
 ---
 
