@@ -1,0 +1,33 @@
+{
+  "name": "repo_policy_violation",
+  "metadata": {
+    "pr_number": 103,
+    "title": "Update migration",
+    "description": "Changes a database migration.",
+    "author": "carol",
+    "action": "opened",
+    "url": "https://example/pr/103",
+    "source_branch": "migration",
+    "source_sha": "abc103",
+    "target_branch": "main",
+    "target_sha": "def103",
+    "repository": "org/repo"
+  },
+  "review_rules": {
+    "policies": {
+      "blocked_paths": [
+        {
+          "path": "migrations/",
+          "severity": "high",
+          "message": "Migration changes need database owner review."
+        }
+      ]
+    }
+  },
+  "diff": "diff --git a/migrations/002_add_user.sql b/migrations/002_add_user.sql\nnew file mode 100644\n--- /dev/null\n+++ b/migrations/002_add_user.sql\n@@ -0,0 +1,2 @@\n+ALTER TABLE users ADD COLUMN plan TEXT;\n+CREATE INDEX idx_users_plan ON users(plan);\n",
+  "expected": {
+    "min_findings": 1,
+    "rule_ids": ["repo.blocked_path"],
+    "false_positive": false
+  }
+}

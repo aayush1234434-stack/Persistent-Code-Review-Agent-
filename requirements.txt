@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+httpx
+asyncpg
+langchain-core
+langchain-openai
+langgraph-checkpoint-postgres
+PyYAML
+pytest

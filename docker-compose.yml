@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: pr_review
+      POSTGRES_USER: pr_user
+      POSTGRES_PASSWORD: pr_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  app:
+    build: .
+    depends_on:
+      - db
+    environment:
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DASHBOARD_API_KEY: ${DASHBOARD_API_KEY}
+      DATABASE_URL: postgresql://pr_user:pr_pass@db:5432/pr_review
+      HTTP_TIMEOUT_SECONDS: 20
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  pgdata:

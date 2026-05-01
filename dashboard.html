@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR Review Dashboard</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --border: #d7dde5;
+      --muted: #64748b;
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --accent: #0f766e;
+      --danger: #b91c1c;
+      --warn: #a16207;
+      --text: #172033;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 { font-size: 20px; margin: 0; }
+    h2 { font-size: 15px; margin: 0 0 10px; }
+    h3 { font-size: 13px; margin: 14px 0 8px; color: #334155; }
+    .app {
+      display: grid;
+      grid-template-columns: minmax(560px, 1.15fr) minmax(480px, 0.85fr);
+      gap: 14px;
+      padding: 14px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      min-width: 0;
+    }
+    .filters {
+      display: grid;
+      grid-template-columns: 1.5fr 90px 130px 120px 130px;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .filters .wide { grid-column: span 2; }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px;
+      font: inherit;
+      background: #fff;
+      min-width: 0;
+    }
+    textarea { min-height: 58px; resize: vertical; }
+    button {
+      border: 1px solid #aab4c0;
+      border-radius: 6px;
+      background: #fff;
+      padding: 8px 10px;
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.danger { border-color: #efb4b4; color: var(--danger); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #e6ebf1; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #eef2f6; color: #334155; position: sticky; top: 0; z-index: 1; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #f8fafc; cursor: pointer; }
+    .selected-row { background: #ecfdf5 !important; }
+    .muted { color: var(--muted); }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 12px;
+      background: #fff;
+      color: #334155;
+    }
+    .badge.pending, .badge.awaiting_approval, .badge.queued { color: var(--warn); border-color: #f2d58a; }
+    .badge.completed { color: var(--accent); border-color: #99d8ce; }
+    .badge.failed { color: var(--danger); border-color: #efb4b4; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .section { border-top: 1px solid #e6ebf1; padding-top: 12px; margin-top: 12px; }
+    .timeline { display: grid; gap: 8px; }
+    .timeline-item { display: grid; grid-template-columns: 110px 1fr; gap: 8px; padding: 8px; border: 1px solid #e6ebf1; border-radius: 6px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+    .small { font-size: 12px; }
+    .scroll { max-height: 260px; overflow: auto; }
+    .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .metric { border: 1px solid #e6ebf1; border-radius: 6px; padding: 8px; }
+    .metric strong { display: block; font-size: 18px; }
+    @media (max-width: 1080px) {
+      .app { grid-template-columns: 1fr; }
+      .filters { grid-template-columns: 1fr 1fr; }
+      .filters .wide { grid-column: span 2; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PR Review Dashboard</h1>
+    <div class="actions">
+      <button id="refresh-btn">Refresh</button>
+      <button id="memory-btn">Repository Memory</button>
+    </div>
+  </header>
+
+  <main class="app">
+    <section class="panel">
+      <h2>Reviews</h2>
+      <div class="filters">
+        <input id="search-input" class="wide" type="text" placeholder="Search title, repo, author">
+        <input id="repo-input" type="text" placeholder="Repo">
+        <input id="pr-input" type="number" placeholder="PR #">
+        <select id="status-select">
+          <option value="">Any status</option>
+          <option value="queued">Queued</option>
+          <option value="pending">Pending</option>
+          <option value="awaiting_approval">Awaiting approval</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+        </select>
+        <input id="author-input" type="text" placeholder="Author">
+        <select id="decision-select">
+          <option value="">Any decision</option>
+          <option value="approve">Approve</option>
+          <option value="needs_review">Needs review</option>
+          <option value="reject">Reject</option>
+          <option value="queued">Queued</option>
+        </select>
+      </div>
+      <div class="table-wrap">
+        <table id="reviews-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Repo</th><th>PR</th><th>Author</th><th>Status</th><th>Decision</th><th>Findings</th><th>Updated</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 id="selected-title">No Review Selected</h2>
+      <p class="muted small" id="selected-meta">Select a review row to inspect findings, history, and actions.</p>
+
+      <div class="actions">
+        <button id="post-final-btn" class="primary" disabled>Post Final Review</button>
+        <button id="approve-btn" disabled>Approve & Post</button>
+        <button id="reject-btn" class="danger" disabled>Reject</button>
+        <button id="request-btn" disabled>Request Changes</button>
+        <button id="history-btn" disabled>Load History</button>
+        <button id="rerun-btn" disabled>Rerun Analysis</button>
+      </div>
+      <div class="grid-2" style="margin-top: 8px;">
+        <input id="checkpoint-input" type="text" placeholder="Checkpoint ID for rerun">
+        <select id="checkpoint-select" disabled>
+          <option value="">Select checkpoint from history</option>
+        </select>
+      </div>
+      <textarea id="reason-input" placeholder="Optional reason or reviewer note"></textarea>
+
+      <div class="section">
+        <h2>Status Timeline</h2>
+        <div id="timeline" class="timeline muted small">No review selected.</div>
+      </div>
+
+      <div class="section">
+        <h2>Findings</h2>
+        <div class="table-wrap scroll">
+          <table id="findings-table">
+            <thead>
+              <tr>
+                <th>#</th><th>Severity</th><th>Type</th><th>Category</th><th>Location</th><th>Description</th><th>Feedback</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="7" class="muted">No review selected.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="section grid-2">
+        <div>
+          <h2>Checkpoint History</h2>
+          <div id="history-list" class="scroll muted small">Load history after selecting a review.</div>
+        </div>
+        <div>
+          <h2>Rerun Comparison</h2>
+          <div id="comparison" class="scroll muted small">No rerun comparison yet.</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Repository Memory</h2>
+        <div id="memory-view" class="muted small">Select a review and load repository memory.</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let selectedId = null;
+    let selectedReview = null;
+    let historyCache = [];
+    const dashboardApiKey = new URLSearchParams(window.location.search).get("key") || "";
+
+    async function fetchJson(url, options) {
+      const requestOptions = options ? { ...options } : {};
+      requestOptions.headers = requestOptions.headers ? { ...requestOptions.headers } : {};
+      if (dashboardApiKey) requestOptions.headers["X-Dashboard-Key"] = dashboardApiKey;
+      const response = await fetch(url, requestOptions);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Request failed");
+      return data;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      }[char]));
+    }
+
+    function shortDate(value) {
+      if (!value) return "-";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+    }
+
+    function badge(value) {
+      const safe = escapeHtml(value || "-");
+      return `<span class="badge ${safe}">${safe}</span>`;
+    }
+
+    function queryString() {
+      const params = new URLSearchParams();
+      const fields = [
+        ["search", "search-input"],
+        ["repo", "repo-input"],
+        ["pr_number", "pr-input"],
+        ["status", "status-select"],
+        ["author", "author-input"],
+        ["decision", "decision-select"]
+      ];
+      fields.forEach(([key, id]) => {
+        const value = document.getElementById(id).value.trim();
+        if (value) params.set(key, value);
+      });
+      return params.toString() ? `?${params.toString()}` : "";
+    }
+
+    function setButtons() {
+      const hasSelection = Boolean(selectedReview);
+      const awaiting = selectedReview?.status === "awaiting_approval";
+      const canPostFinal = Boolean(selectedReview?.current_state) && !["queued", "failed"].includes(selectedReview?.status);
+      document.getElementById("post-final-btn").disabled = !canPostFinal;
+      document.getElementById("approve-btn").disabled = !awaiting;
+      document.getElementById("reject-btn").disabled = !awaiting;
+      document.getElementById("request-btn").disabled = !awaiting;
+      document.getElementById("history-btn").disabled = !hasSelection;
+      document.getElementById("rerun-btn").disabled = !hasSelection || !document.getElementById("checkpoint-input").value.trim();
+      document.getElementById("checkpoint-select").disabled = !hasSelection || historyCache.length === 0;
+    }
+
+    async function loadReviews() {
+      const rows = await fetchJson(`/reviews${queryString()}`);
+      const tbody = document.querySelector("#reviews-table tbody");
+      tbody.innerHTML = "";
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        if (row.id === selectedId) tr.classList.add("selected-row");
+        tr.innerHTML = `
+          <td>${row.id}</td>
+          <td>${escapeHtml(row.repo)}</td>
+          <td>${row.pr_number ?? ""}</td>
+          <td>${escapeHtml(row.author || "-")}</td>
+          <td>${badge(row.status)}</td>
+          <td>${escapeHtml(row.decision || "-")}</td>
+          <td>${row.findings_count ?? 0}</td>
+          <td class="small">${escapeHtml(shortDate(row.updated_at))}</td>
+        `;
+        tr.addEventListener("click", () => selectReview(row.id));
+        tbody.appendChild(tr);
+      });
+      if (!rows.length) tbody.innerHTML = `<tr><td colspan="8" class="muted">No reviews match the current filters.</td></tr>`;
+    }
+
+    async function selectReview(id) {
+      selectedId = id;
+      historyCache = [];
+      selectedReview = await fetchJson(`/reviews/${id}`);
+      renderSelected();
+      await loadReviews();
+      try {
+        await loadHistory(false);
+      } catch (_err) {
+        renderHistory([]);
+      }
+      await loadMemory();
+    }
+
+    function renderSelected() {
+      const review = selectedReview;
+      document.getElementById("selected-title").textContent = review
+        ? `${review.repo} #${review.pr_number}: ${review.title || ""}`
+        : "No Review Selected";
+      document.getElementById("selected-meta").textContent = review
+        ? `${review.status} · ${review.author || "unknown author"} · ${review.findings.length} finding(s) · model ${review.current_state?.review_model_policy?.selected_model || "n/a"}`
+        : "Select a review row to inspect findings, history, and actions.";
+      renderTimeline(review?.timeline || []);
+      renderFindings(review?.findings || []);
+      renderComparison(review?.current_state?.rerun_comparison);
+      setButtons();
+    }
+
+    function renderTimeline(items) {
+      const target = document.getElementById("timeline");
+      if (!items.length) {
+        target.textContent = "No timeline available.";
+        return;
+      }
+      target.innerHTML = items.map((item) => `
+        <div class="timeline-item">
+          <div>${badge(item.status)}</div>
+          <div>
+            <strong>${escapeHtml(item.label)}</strong>
+            <div>${escapeHtml(item.detail || "")}</div>
+            <div class="muted mono">${escapeHtml(shortDate(item.at))}</div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderFindings(findings) {
+      const tbody = document.querySelector("#findings-table tbody");
+      if (!findings.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="muted">No findings.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = findings.map((finding, index) => {
+        const feedback = finding.human_feedback?.verdict || "-";
+        const location = `${finding.file || "unknown"}${finding.line ? `:${finding.line}` : ""}`;
+        const context = (finding.line_context || []).slice(0, 2)
+          .map((line) => `<div class="muted mono">${escapeHtml(line.change)}:${escapeHtml(line.line)} ${escapeHtml(line.content)}</div>`)
+          .join("");
+        return `
+          <tr>
+            <td>${index + 1}</td>
+            <td>${escapeHtml(finding.effective_severity || finding.severity || "-")}<div class="muted small">conf ${escapeHtml(finding.confidence ?? "n/a")}</div></td>
+            <td>${escapeHtml(finding.finding_type || "-")}</td>
+            <td>${escapeHtml(finding.category || "-")}</td>
+            <td class="mono">${escapeHtml(location)}</td>
+            <td>${escapeHtml(finding.description || "")}<div class="muted small">Evidence: ${escapeHtml(finding.evidence || "changed-line context")}</div>${context}</td>
+            <td>
+              <div class="small muted">${escapeHtml(feedback)}</div>
+              <button data-feedback="valid" data-index="${index}">Valid</button>
+              <button data-feedback="invalid" data-index="${index}">Invalid</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+      tbody.querySelectorAll("button[data-feedback]").forEach((button) => {
+        button.addEventListener("click", () => markFeedback(button.dataset.index, button.dataset.feedback).catch(showError));
+      });
+    }
+
+    function renderHistory(history) {
+      const target = document.getElementById("history-list");
+      const select = document.getElementById("checkpoint-select");
+      select.innerHTML = `<option value="">Select checkpoint from history</option>`;
+      if (!history.length) {
+        target.textContent = "No checkpoint history available.";
+        setButtons();
+        return;
+      }
+      target.innerHTML = history.map((item, index) => {
+        const checkpoint = item.checkpoint_id || "";
+        const option = document.createElement("option");
+        option.value = checkpoint;
+        option.textContent = `#${index + 1} ${item.summary || checkpoint || "checkpoint"}`;
+        select.appendChild(option);
+        return `
+          <div class="timeline-item">
+            <div class="mono">#${index + 1}</div>
+            <div>
+              <strong>${escapeHtml(item.summary || "Checkpoint")}</strong>
+              <div class="mono">${escapeHtml(checkpoint || "unknown")}</div>
+              <div class="muted">Findings: ${item.state?.ranked_findings?.length ?? 0}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+      setButtons();
+    }
+
+    function renderComparison(comparison) {
+      const target = document.getElementById("comparison");
+      if (!comparison?.counts) {
+        target.textContent = "No rerun comparison yet.";
+        return;
+      }
+      const counts = comparison.counts;
+      target.innerHTML = `
+        <div class="summary-grid">
+          <div class="metric"><strong>${counts.old}</strong><span>Old</span></div>
+          <div class="metric"><strong>${counts.new}</strong><span>New</span></div>
+          <div class="metric"><strong>${counts.added}</strong><span>Added</span></div>
+          <div class="metric"><strong>${counts.removed}</strong><span>Removed</span></div>
+        </div>
+        <h3>Added</h3>${renderFindingList(comparison.added)}
+        <h3>Removed</h3>${renderFindingList(comparison.removed)}
+      `;
+    }
+
+    function renderFindingList(findings) {
+      if (!findings?.length) return `<div class="muted">None</div>`;
+      return findings.slice(0, 8).map((finding) => `
+        <div class="small">
+          <span class="mono">${escapeHtml(finding.file || "")}${finding.line ? `:${finding.line}` : ""}</span>
+          ${escapeHtml(finding.description || "")}
+        </div>
+      `).join("");
+    }
+
+    async function loadHistory(showDetails = true) {
+      if (!selectedId) return;
+      const history = await fetchJson(`/reviews/${selectedId}/history`);
+      historyCache = history.history || [];
+      renderHistory(historyCache);
+      if (showDetails) renderComparison(selectedReview?.current_state?.rerun_comparison);
+    }
+
+    async function loadMemory() {
+      const repo = selectedReview?.repo || document.getElementById("repo-input").value.trim();
+      const memory = await fetchJson(`/memory${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`);
+      const target = document.getElementById("memory-view");
+      target.innerHTML = `
+        <div class="summary-grid">
+          <div class="metric"><strong>${memory.reviews_count}</strong><span>Reviews</span></div>
+          <div class="metric"><strong>${memory.recurring_risky_files.length}</strong><span>Risky files</span></div>
+          <div class="metric"><strong>${memory.authors.length}</strong><span>Authors</span></div>
+          <div class="metric"><strong>${memory.categories.length}</strong><span>Categories</span></div>
+        </div>
+        <div class="grid-2">
+          <div><h3>Risky Files</h3>${renderCounts(memory.recurring_risky_files)}</div>
+          <div><h3>Authors</h3>${renderCounts(memory.authors)}</div>
+          <div><h3>Categories</h3>${renderCounts(memory.categories)}</div>
+          <div><h3>Decisions</h3>${renderCounts(memory.decisions)}</div>
+        </div>
+      `;
+    }
+
+    function renderCounts(items) {
+      if (!items?.length) return `<div class="muted">No data</div>`;
+      return items.slice(0, 10).map((item) => `
+        <div class="small"><span class="mono">${escapeHtml(item.count)}</span> ${escapeHtml(item.name)}</div>
+      `).join("");
+    }
+
+    async function postFinalReview() {
+      if (!selectedId) return;
+      const result = await fetchJson(`/reviews/${selectedId}/post-final-review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inline: true })
+      });
+      await selectReview(result.id);
+    }
+
+    async function approve() {
+      if (!selectedId) return;
+      const result = await fetchJson(`/reviews/${selectedId}/approve`, { method: "POST" });
+      await selectReview(result.id);
+    }
+
+    async function reject() {
+      if (!selectedId) return;
+      const reason = document.getElementById("reason-input").value.trim();
+      const result = await fetchJson(`/reviews/${selectedId}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reason ? { reason } : {})
+      });
+      await selectReview(result.id);
+    }
+
+    async function requestChanges() {
+      if (!selectedId) return;
+      const reason = document.getElementById("reason-input").value.trim();
+      const result = await fetchJson(`/reviews/${selectedId}/request-changes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reason ? { reason } : {})
+      });
+      await selectReview(result.id);
+    }
+
+    async function rerunFromCheckpoint() {
+      if (!selectedId) return;
+      const checkpointId = document.getElementById("checkpoint-input").value.trim();
+      if (!checkpointId) return;
+      const result = await fetchJson(`/reviews/${selectedId}/rerun`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ checkpoint_id: checkpointId })
+      });
+      selectedReview = await fetchJson(`/reviews/${result.id}`);
+      renderSelected();
+      await loadReviews();
+    }
+
+    async function markFeedback(index, verdict) {
+      const note = document.getElementById("reason-input").value.trim();
+      await fetchJson(`/reviews/${selectedId}/findings/${index}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verdict, note })
+      });
+      selectedReview = await fetchJson(`/reviews/${selectedId}`);
+      renderSelected();
+    }
+
+    function showError(err) {
+      document.getElementById("selected-meta").textContent = `Error: ${err.message}`;
+    }
+
+    ["search-input", "repo-input", "pr-input", "status-select", "author-input", "decision-select"].forEach((id) => {
+      document.getElementById(id).addEventListener("input", () => loadReviews().catch(showError));
+      document.getElementById(id).addEventListener("change", () => loadReviews().catch(showError));
+    });
+    document.getElementById("refresh-btn").addEventListener("click", () => loadReviews().catch(showError));
+    document.getElementById("memory-btn").addEventListener("click", () => loadMemory().catch(showError));
+    document.getElementById("post-final-btn").addEventListener("click", () => postFinalReview().catch(showError));
+    document.getElementById("approve-btn").addEventListener("click", () => approve().catch(showError));
+    document.getElementById("reject-btn").addEventListener("click", () => reject().catch(showError));
+    document.getElementById("request-btn").addEventListener("click", () => requestChanges().catch(showError));
+    document.getElementById("history-btn").addEventListener("click", () => loadHistory(true).catch(showError));
+    document.getElementById("rerun-btn").addEventListener("click", () => rerunFromCheckpoint().catch(showError));
+    document.getElementById("checkpoint-select").addEventListener("change", (event) => {
+      document.getElementById("checkpoint-input").value = event.target.value || "";
+      setButtons();
+    });
+    document.getElementById("checkpoint-input").addEventListener("input", setButtons);
+
+    setButtons();
+    loadReviews().catch(showError);
+  </script>
+</body>
+</html>

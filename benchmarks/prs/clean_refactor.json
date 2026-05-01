@@ -1,0 +1,22 @@
+{
+  "name": "clean_refactor",
+  "metadata": {
+    "pr_number": 102,
+    "title": "Rename parser helper",
+    "description": "Renames a helper without changing behavior.",
+    "author": "bob",
+    "action": "opened",
+    "url": "https://example/pr/102",
+    "source_branch": "parser-rename",
+    "source_sha": "abc102",
+    "target_branch": "main",
+    "target_sha": "def102",
+    "repository": "org/repo"
+  },
+  "diff": "diff --git a/parser.py b/parser.py\nindex 111..222 100644\n--- a/parser.py\n+++ b/parser.py\n@@ -1,3 +1,3 @@\n-def parse_value(raw):\n+def normalize_value(raw):\n     return raw.strip()\n",
+  "expected": {
+    "min_findings": 0,
+    "rule_ids": [],
+    "false_positive": false
+  }
+}
