@@ -429,7 +429,3 @@ git push -u origin main
 - Scope GitHub tokens as narrowly as possible
 - Keep dashboard access behind `DASHBOARD_API_KEY`
 - Treat PR code, filenames, comments, and policy files as untrusted input
-
-## Status
-
-This is a strong prototype and early production candidate. It is ready to push to GitHub and improve incrementally through issues and pull requests.
