@@ -1,7 +1,5 @@
 # Persistent Code Review Agent
 
-# Persistent Code Review Agent
-
 An automated code review agent that analyzes pull requests, detects issues, and generates structured review feedback with severity ranking.
 
 ---
