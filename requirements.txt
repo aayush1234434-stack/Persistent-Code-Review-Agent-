@@ -4,6 +4,7 @@ httpx
 asyncpg
 langchain-core
 langchain-openai
+langgraph
 langgraph-checkpoint-postgres
 PyYAML
 prometheus-client

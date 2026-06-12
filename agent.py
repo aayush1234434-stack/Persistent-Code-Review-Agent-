@@ -2,10 +2,11 @@ import contextvars
 import importlib
 import json
 import logging
+import operator
 import os
 import re
 import time
-from typing import Any, Literal, List, Optional, TypedDict
+from typing import Annotated, Any, Literal, List, Optional, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError
@@ -26,6 +27,14 @@ _llm_usage_calls: contextvars.ContextVar[list[dict[str, Any]] | None] = contextv
     "llm_usage_calls",
     default=None,
 )
+
+FINDING_REVIEW_NODES = frozenset({
+    "logic_issues",
+    "security_issues",
+    "performance_issues",
+    "contract_issues",
+    "test_evaluation",
+})
 
 # USD per 1M tokens (input, output). Unknown models fall back to zero cost.
 MODEL_TOKEN_PRICING: dict[str, tuple[float, float]] = {
@@ -77,6 +86,7 @@ class PRfile(TypedDict):
 
     ranked_findings: List[Finding]
     merge_decision: MergeDecision
+    analysis_errors: Annotated[list[dict[str, Any]], operator.add]
 
 
 class FileClass(BaseModel):
@@ -505,7 +515,7 @@ def extract_summary(state: PRfile):
 
     except Exception as e:
         logger.exception("extract_summary failed: %s", e)
-        return {"pr_summary": ""}
+        return {"pr_summary": "", **analysis_failure("extract_summary", e)}
 
 
 # -----------------------------
@@ -545,7 +555,7 @@ def classify_files(state: PRfile):
 
     except Exception as e:
         logger.exception("classify_files failed: %s", e)
-        return {"file_classes": []}
+        return {"file_classes": [], **analysis_failure("classify_files", e)}
 
 
 # -----------------------------
@@ -591,6 +601,31 @@ def parse_finding_result(parsed: FindingResult) -> list[dict]:
     return [model_dump(finding) for finding in parsed.findings]
 
 
+def analysis_failure(node: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "analysis_errors": [{
+            "node": node,
+            "error_type": type(exc).__name__,
+            "message": str(exc)[:500],
+        }],
+    }
+
+
+def finding_review_failure(node: str, findings_key: str, exc: Exception) -> dict[str, Any]:
+    return {
+        findings_key: [],
+        **analysis_failure(node, exc),
+    }
+
+
+def finding_review_failures(state: PRfile) -> list[dict[str, Any]]:
+    return [
+        error
+        for error in state.get("analysis_errors", [])
+        if isinstance(error, dict) and error.get("node") in FINDING_REVIEW_NODES
+    ]
+
+
 def logic_issues(state: PRfile):
     try:
         parsed = invoke_structured(
@@ -607,7 +642,7 @@ def logic_issues(state: PRfile):
 
     except Exception as e:
         logger.exception("logic_issues failed: %s", e)
-        return {"logic_issues": []}
+        return finding_review_failure("logic_issues", "logic_issues", e)
 
 
 # -----------------------------
@@ -630,7 +665,7 @@ def security_issues(state: PRfile):
 
     except Exception as e:
         logger.exception("security_issues failed: %s", e)
-        return {"security_issues": []}
+        return finding_review_failure("security_issues", "security_issues", e)
 
 
 # -----------------------------
@@ -653,7 +688,7 @@ def performance_issues(state: PRfile):
 
     except Exception as e:
         logger.exception("performance_issues failed: %s", e)
-        return {"performance_issues": []}
+        return finding_review_failure("performance_issues", "performance_issues", e)
 
 
 # -----------------------------
@@ -676,7 +711,7 @@ def contract_issues(state: PRfile):
 
     except Exception as e:
         logger.exception("contract_issues failed: %s", e)
-        return {"contract_issues": []}
+        return finding_review_failure("contract_issues", "contract_issues", e)
 
 
 # -----------------------------
@@ -700,7 +735,7 @@ def test_evaluation(state: PRfile):
 
     except Exception as e:
         logger.exception("test_evaluation failed: %s", e)
-        return {"test_evaluation": []}
+        return finding_review_failure("test_evaluation", "test_evaluation", e)
 
 
 # -----------------------------
@@ -955,13 +990,25 @@ def verify_findings_grounded(state: PRfile):
 # -----------------------------
 
 def merge_decision(state: PRfile):
-    ranked = state["ranked_findings"]
+    ranked = state.get("ranked_findings", [])
+    review_failures = finding_review_failures(state)
 
     if not ranked:
+        if review_failures:
+            failed_nodes = ", ".join(sorted({str(err.get("node", "unknown")) for err in review_failures}))
+            return {
+                "merge_decision": {
+                    "decision": "needs_review",
+                    "reason": (
+                        "Automated review incomplete: LLM analysis failed for "
+                        f"{failed_nodes}. Human review required."
+                    ),
+                }
+            }
         return {
             "merge_decision": {
                 "decision": "approve",
-                "reason": "No significant issues found."
+                "reason": "No significant issues found.",
             }
         }
 

@@ -1028,6 +1028,7 @@ def format_review_comment(result: dict) -> str:
     budget = result.get("review_budget", {})
     grounding = result.get("grounding_summary", {})
 
+    analysis_errors = result.get("analysis_errors", [])
     lines = [
         "## 🤖 Automated PR Review",
         f"**Decision:** `{decision}`",
@@ -1035,6 +1036,11 @@ def format_review_comment(result: dict) -> str:
         "",
         f"**Grounding:** {grounding.get('verified', 0)} verified, {grounding.get('dropped', 0)} dropped as ungrounded.",
     ]
+    if analysis_errors:
+        failed_nodes = ", ".join(
+            sorted({str(err.get("node", "unknown")) for err in analysis_errors if isinstance(err, dict)})
+        )
+        lines.append(f"**Analysis errors:** automated checks failed for `{failed_nodes}`.")
 
     if budget:
         lines.extend([
@@ -1238,6 +1244,7 @@ def compact_review_state(state: dict | None, *, llm_usage: dict | None = None) -
         "final_review_posted": state.get("final_review_posted"),
         "rerun_comparison": state.get("rerun_comparison", {}),
         "github_check_run_id": state.get("github_check_run_id"),
+        "analysis_errors": state.get("analysis_errors", []),
     }
 
 
@@ -1499,6 +1506,48 @@ async def process_opened_pr(metadata: dict) -> None:
 
 
 # -----------------------------
+# LangGraph Postgres persistence
+# -----------------------------
+def create_langgraph_pg_pool(database_url: str):
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    return ConnectionPool(
+        database_url,
+        min_size=1,
+        max_size=10,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )
+
+
+def init_langgraph_persistence(database_url: str) -> tuple[Any, Any, Any]:
+    """Create checkpointer and store backed by a shared psycopg connection pool.
+
+    PostgresSaver/PostgresStore.from_conn_string() return context managers for
+    short-lived scripts. Long-running servers must construct them with a pool.
+    """
+    checkpoint_module = importlib.import_module("langgraph.checkpoint.postgres")
+    store_module = importlib.import_module("langgraph.store.postgres")
+    postgres_saver_cls = getattr(checkpoint_module, "PostgresSaver")
+    postgres_store_cls = getattr(store_module, "PostgresStore")
+
+    pool = create_langgraph_pg_pool(database_url)
+    try:
+        checkpointer = postgres_saver_cls(pool)
+        checkpointer.setup()
+        store = postgres_store_cls(pool)
+        store.setup()
+    except Exception:
+        pool.close()
+        raise
+    return checkpointer, store, pool
+
+
+# -----------------------------
 # GitHub webhook
 # -----------------------------
 @app.on_event("startup")
@@ -1510,37 +1559,29 @@ async def startup() -> None:
     app.state.db = await asyncpg.create_pool(DATABASE_URL)
     checkpointer = None
     store = None
+    langgraph_pool = None
 
     try:
-        checkpoint_module = importlib.import_module("langgraph.checkpoint.postgres")
-        postgres_saver_cls = getattr(checkpoint_module, "PostgresSaver")
-        checkpointer = postgres_saver_cls.from_conn_string(DATABASE_URL)
-        checkpointer.setup()
+        checkpointer, store, langgraph_pool = init_langgraph_persistence(DATABASE_URL)
     except ModuleNotFoundError:
-        logger.warning("LangGraph Postgres checkpointer is unavailable; starting without checkpoint persistence.")
-
-    try:
-        store_module = importlib.import_module("langgraph.store.postgres")
-        postgres_store_cls = getattr(store_module, "PostgresStore")
-        store = postgres_store_cls.from_conn_string(DATABASE_URL)
-        store.setup()
-    except ModuleNotFoundError:
-        logger.warning("LangGraph Postgres store is unavailable; starting without review memory persistence.")
+        logger.warning(
+            "LangGraph Postgres persistence is unavailable; starting without checkpoint/memory persistence."
+        )
+    except Exception as exc:
+        logger.warning("Failed initializing LangGraph Postgres persistence: %s", exc)
 
     app.state.checkpointer = checkpointer
     app.state.store = store
+    app.state.langgraph_pool = langgraph_pool
     app.state.graph = build_graph(checkpointer=checkpointer, store=store)
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await app.state.db.close()
-    checkpointer = getattr(app.state, "checkpointer", None)
-    if checkpointer is not None:
-        checkpointer.close()
-    store = getattr(app.state, "store", None)
-    if store is not None and hasattr(store, "close"):
-        store.close()
+    langgraph_pool = getattr(app.state, "langgraph_pool", None)
+    if langgraph_pool is not None:
+        langgraph_pool.close()
 
 
 @app.get("/reviews/{id}")

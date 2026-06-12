@@ -319,6 +319,47 @@ def test_deterministic_checks_find_secret_and_repo_policy():
     assert {"repo.blocked_path", "deterministic.secret", "repo.no_print"} <= rule_ids
 
 
+def test_merge_decision_fails_closed_when_finding_review_llm_failed():
+    state = {
+        "ranked_findings": [],
+        "analysis_errors": [{
+            "node": "security_issues",
+            "error_type": "RuntimeError",
+            "message": "OpenAI unavailable",
+        }],
+    }
+    decision = agent.merge_decision(state)["merge_decision"]
+    assert decision["decision"] == "needs_review"
+    assert "security_issues" in decision["reason"]
+    assert "Human review required" in decision["reason"]
+
+
+def test_merge_decision_approves_when_no_findings_and_no_review_failures():
+    decision = agent.merge_decision({"ranked_findings": [], "analysis_errors": []})["merge_decision"]
+    assert decision["decision"] == "approve"
+
+
+def test_merge_decision_ignores_non_finding_node_failures_for_empty_ranked():
+    state = {
+        "ranked_findings": [],
+        "analysis_errors": [{
+            "node": "extract_summary",
+            "error_type": "RuntimeError",
+            "message": "summary failed",
+        }],
+    }
+    decision = agent.merge_decision(state)["merge_decision"]
+    assert decision["decision"] == "approve"
+
+
+def test_finding_review_failure_records_analysis_error():
+    exc = RuntimeError("rate limit")
+    result = agent.finding_review_failure("logic_issues", "logic_issues", exc)
+    assert result["logic_issues"] == []
+    assert result["analysis_errors"][0]["node"] == "logic_issues"
+    assert result["analysis_errors"][0]["error_type"] == "RuntimeError"
+
+
 def test_diff_position_for_finding():
     pr_context = {
         "files": [{
