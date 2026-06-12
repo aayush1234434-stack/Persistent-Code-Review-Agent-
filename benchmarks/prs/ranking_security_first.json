@@ -1,0 +1,44 @@
+{
+  "name": "ranking_security_first",
+  "metadata": {
+    "pr_number": 204,
+    "title": "Mixed concerns",
+    "description": "Security and performance notes.",
+    "author": "dave",
+    "action": "opened",
+    "url": "https://example/pr/204",
+    "source_branch": "mixed",
+    "source_sha": "sha204",
+    "target_branch": "main",
+    "target_sha": "def204",
+    "repository": "org/repo"
+  },
+  "diff": "diff --git a/app.py b/app.py\nindex 111..222 100644\n--- a/app.py\n+++ b/app.py\n@@ -4,2 +4,4 @@\n def run():\n     pass\n+helper()\n+another()\n",
+  "injected_issues": {
+    "security_issues": [
+      {
+        "description": "Missing authorization check before helper call",
+        "file": "app.py",
+        "line": 6,
+        "severity": "medium",
+        "confidence": 0.8,
+        "finding_type": "possible_concern"
+      }
+    ],
+    "performance_issues": [
+      {
+        "description": "Potential redundant helper invocation",
+        "file": "app.py",
+        "line": 7,
+        "severity": "medium",
+        "confidence": 0.55,
+        "finding_type": "possible_concern"
+      }
+    ]
+  },
+  "expected": {
+    "min_findings": 2,
+    "top_category": "security",
+    "merge_decision": "needs_review"
+  }
+}

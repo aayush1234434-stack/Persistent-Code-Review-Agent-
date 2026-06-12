@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-benchmark:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_WEBHOOK_SECRET: test_secret
+      GITHUB_TOKEN: test_token
+      DATABASE_URL: postgresql://pr_user:pr_pass@localhost:5432/pr_review
+      DASHBOARD_API_KEY: test-dashboard-key
+      OPENAI_API_KEY: sk-test-not-used
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit and API tests
+        run: pytest -q
+
+      - name: Run PR review benchmarks
+        run: python benchmarks/pr_review_benchmark.py

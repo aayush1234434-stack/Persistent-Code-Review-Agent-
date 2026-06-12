@@ -1,0 +1,24 @@
+{
+  "name": "merge_approve_clean",
+  "metadata": {
+    "pr_number": 202,
+    "title": "Rename helper",
+    "description": "Pure rename.",
+    "author": "bob",
+    "action": "opened",
+    "url": "https://example/pr/202",
+    "source_branch": "rename",
+    "source_sha": "sha202",
+    "target_branch": "main",
+    "target_sha": "def202",
+    "repository": "org/repo"
+  },
+  "diff": "diff --git a/parser.py b/parser.py\nindex 111..222 100644\n--- a/parser.py\n+++ b/parser.py\n@@ -1,3 +1,3 @@\n-def parse_value(raw):\n+def normalize_value(raw):\n     return raw.strip()\n",
+  "expected": {
+    "min_findings": 0,
+    "rule_ids": [],
+    "merge_decision": "approve",
+    "min_verified": 0,
+    "max_dropped": 0
+  }
+}

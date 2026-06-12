@@ -26,7 +26,7 @@
   },
   "diff": "diff --git a/migrations/002_add_user.sql b/migrations/002_add_user.sql\nnew file mode 100644\n--- /dev/null\n+++ b/migrations/002_add_user.sql\n@@ -0,0 +1,2 @@\n+ALTER TABLE users ADD COLUMN plan TEXT;\n+CREATE INDEX idx_users_plan ON users(plan);\n",
   "expected": {
-    "min_findings": 1,
+    "min_deterministic_findings": 1,
     "rule_ids": ["repo.blocked_path"],
     "false_positive": false
   }

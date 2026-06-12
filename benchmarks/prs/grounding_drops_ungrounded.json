@@ -1,0 +1,36 @@
+{
+  "name": "grounding_drops_ungrounded",
+  "metadata": {
+    "pr_number": 203,
+    "title": "Small tweak",
+    "description": "Minor edit.",
+    "author": "carol",
+    "action": "opened",
+    "url": "https://example/pr/203",
+    "source_branch": "tweak",
+    "source_sha": "sha203",
+    "target_branch": "main",
+    "target_sha": "def203",
+    "repository": "org/repo"
+  },
+  "diff": "diff --git a/app.py b/app.py\nindex 111..222 100644\n--- a/app.py\n+++ b/app.py\n@@ -10,3 +10,4 @@\n def handler():\n     return True\n+return False\n",
+  "injected_issues": {
+    "logic_issues": [
+      {
+        "description": "Ungrounded logic issue on unrelated line",
+        "file": "app.py",
+        "line": 999,
+        "severity": "critical",
+        "confidence": 0.9,
+        "finding_type": "definite_bug"
+      }
+    ]
+  },
+  "expected": {
+    "min_findings": 0,
+    "rule_ids": [],
+    "merge_decision": "approve",
+    "min_verified": 0,
+    "min_dropped": 1
+  }
+}
