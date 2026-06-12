@@ -1,0 +1,41 @@
+# Secrets and local environment (never bake into images)
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+.github
+
+# Local Python environments and caches
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.tox
+*.egg-info
+dist
+build
+
+# Editor and OS noise
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo
+.ipynb_checkpoints
+*.ipynb
+
+# Dev-only files (not needed at runtime)
+docker-compose.yml
+tests
+benchmarks
+README.md
