@@ -6,4 +6,5 @@ langchain-core
 langchain-openai
 langgraph-checkpoint-postgres
 PyYAML
+prometheus-client
 pytest

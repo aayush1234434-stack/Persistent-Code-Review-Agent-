@@ -11,22 +11,39 @@ from enum import Enum
 from typing import Any
 import httpx
 import asyncpg
-from agent import build_graph
+from agent import build_graph, merge_llm_usage_into_budget, reset_llm_usage, summarize_llm_usage
 from fastapi import FastAPI, Request, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
-
-app = FastAPI()
-logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+from observability import (
+    log_event,
+    metrics_response,
+    record_review_outcome,
+    register_request_logging_middleware,
+    setup_logging,
 )
+
+setup_logging()
+app = FastAPI()
+register_request_logging_middleware(app)
+logger = logging.getLogger("pr_review")
 
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DASHBOARD_API_KEY = os.environ.get("DASHBOARD_API_KEY")
 HTTP_TIMEOUT_SECONDS = float(os.environ.get("HTTP_TIMEOUT_SECONDS", "20"))
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development").strip().lower()
+GITHUB_CHECK_RUN_NAME = os.environ.get("GITHUB_CHECK_RUN_NAME", "PR Reviewer")
+
+
+def is_production() -> bool:
+    return ENVIRONMENT in {"production", "prod"}
+
+
+def dashboard_auth_required() -> bool:
+    if is_production():
+        return True
+    return os.environ.get("REQUIRE_DASHBOARD_AUTH", "").strip().lower() in {"1", "true", "yes"}
 
 
 class ReviewStatus(str, Enum):
@@ -645,6 +662,169 @@ async def post_inline_review_comment(
     response.raise_for_status()
 
 
+def merge_decision_to_check_conclusion(decision: str) -> str:
+    mapping = {
+        "approve": "success",
+        "reject": "failure",
+        "needs_review": "neutral",
+        "queued": "neutral",
+    }
+    return mapping.get(decision, "neutral")
+
+
+def check_run_output_from_result(result: dict) -> dict[str, str]:
+    decision = result.get("merge_decision", {}).get("decision", "needs_review")
+    reason = result.get("merge_decision", {}).get("reason", "No reason provided.")
+    summary = format_review_comment(result)
+    if result.get("error"):
+        summary = f"{summary}\n\n**Error:** {result['error']}"
+    return {
+        "title": f"PR review: {decision}",
+        "summary": summary,
+        "text": reason,
+    }
+
+
+async def create_github_check_run(
+    repo: str,
+    head_sha: str,
+    review_id: int,
+    *,
+    status: str = "in_progress",
+    conclusion: str | None = None,
+    output: dict[str, str] | None = None,
+) -> int | None:
+    if not GITHUB_TOKEN or not head_sha:
+        return None
+    url = f"https://api.github.com/repos/{repo}/check-runs"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    payload: dict[str, Any] = {
+        "name": GITHUB_CHECK_RUN_NAME,
+        "head_sha": head_sha,
+        "status": status,
+        "external_id": f"pr-review-{review_id}",
+    }
+    if output:
+        payload["output"] = output
+    if status == "completed":
+        payload["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        payload["conclusion"] = conclusion or "neutral"
+
+    async def _request():
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(url, headers=headers, json=payload)
+
+    try:
+        response = await github_request_with_retry(_request)
+        response.raise_for_status()
+        check_run_id = response.json().get("id")
+        log_event(
+            logging.INFO,
+            "github_check_run_created",
+            "GitHub check run created",
+            repo=repo,
+            review_id=review_id,
+            source_sha=head_sha,
+            status=status,
+        )
+        return int(check_run_id) if check_run_id is not None else None
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "Failed creating GitHub check run",
+            extra={
+                "event": "github_check_run_error",
+                "repo": repo,
+                "review_id": review_id,
+                "status_code": exc.response.status_code,
+            },
+        )
+        return None
+
+
+async def update_github_check_run(
+    repo: str,
+    check_run_id: int,
+    *,
+    status: str = "completed",
+    conclusion: str = "neutral",
+    output: dict[str, str] | None = None,
+) -> None:
+    if not GITHUB_TOKEN:
+        return
+    url = f"https://api.github.com/repos/{repo}/check-runs/{check_run_id}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    payload: dict[str, Any] = {
+        "status": status,
+        "conclusion": conclusion,
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if output:
+        payload["output"] = output
+
+    async def _request():
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.patch(url, headers=headers, json=payload)
+
+    try:
+        response = await github_request_with_retry(_request)
+        response.raise_for_status()
+        log_event(
+            logging.INFO,
+            "github_check_run_updated",
+            "GitHub check run updated",
+            repo=repo,
+            status=status,
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "Failed updating GitHub check run",
+            extra={
+                "event": "github_check_run_error",
+                "repo": repo,
+                "status_code": exc.response.status_code,
+            },
+        )
+
+
+async def sync_github_check_run(
+    repo: str,
+    head_sha: str | None,
+    review_id: int,
+    result: dict,
+    *,
+    existing_check_run_id: int | None = None,
+) -> int | None:
+    if not head_sha:
+        return existing_check_run_id
+    decision = result.get("merge_decision", {}).get("decision", "needs_review")
+    output = check_run_output_from_result(result)
+    if existing_check_run_id is None:
+        return await create_github_check_run(
+            repo,
+            head_sha,
+            review_id,
+            status="completed",
+            conclusion=merge_decision_to_check_conclusion(decision),
+            output=output,
+        )
+    await update_github_check_run(
+        repo,
+        existing_check_run_id,
+        status="completed",
+        conclusion=merge_decision_to_check_conclusion(decision),
+        output=output,
+    )
+    return existing_check_run_id
+
+
 def diff_position_for_finding(pr_context: dict, finding: dict) -> int | None:
     file_name = finding.get("file")
     line = finding.get("line")
@@ -871,6 +1051,13 @@ def format_review_comment(result: dict) -> str:
             )
         if budget.get("skipped_files") or budget.get("pruned_files"):
             lines.append("Some files or lines were skipped/pruned before model review.")
+        if budget.get("llm_total_tokens"):
+            lines.append(
+                f"**LLM usage:** {budget.get('llm_total_tokens', 0)} tokens "
+                f"({budget.get('llm_prompt_tokens', 0)} prompt / "
+                f"{budget.get('llm_completion_tokens', 0)} completion); "
+                f"estimated cost `${budget.get('llm_estimated_cost_usd', 0.0):.4f}`."
+            )
 
     lines.extend([
         "",
@@ -1031,14 +1218,17 @@ async def summarize_human_feedback(pool: asyncpg.Pool, repo: str, author: str | 
     }
 
 
-def compact_review_state(state: dict | None) -> dict:
+def compact_review_state(state: dict | None, *, llm_usage: dict | None = None) -> dict:
     if not isinstance(state, dict):
         return {}
+    review_budget = state.get("pr_context", {}).get("review_budget", state.get("review_budget", {}))
+    if llm_usage:
+        review_budget = merge_llm_usage_into_budget(review_budget, llm_usage)
     return {
         "pr_summary": state.get("pr_summary", ""),
         "ranked_findings": state.get("ranked_findings", []),
         "merge_decision": state.get("merge_decision", {}),
-        "review_budget": state.get("pr_context", {}).get("review_budget", state.get("review_budget", {})),
+        "review_budget": review_budget,
         "review_model_policy": state.get("pr_context", {}).get("review_model_policy", state.get("review_model_policy", {})),
         "deterministic_issues": state.get("deterministic_issues", []),
         "dropped_findings": state.get("dropped_findings", []),
@@ -1047,7 +1237,14 @@ def compact_review_state(state: dict | None) -> dict:
         "feedback_summary": state.get("feedback_summary", {}),
         "final_review_posted": state.get("final_review_posted"),
         "rerun_comparison": state.get("rerun_comparison", {}),
+        "github_check_run_id": state.get("github_check_run_id"),
     }
+
+
+def finalize_graph_result(graph_state: dict | None) -> dict:
+    usage = summarize_llm_usage()
+    compact = compact_review_state(graph_state, llm_usage=usage if usage.get("calls") else None)
+    return compact
 
 
 def as_dict(value) -> dict:
@@ -1070,7 +1267,10 @@ def as_dict(value) -> dict:
 
 
 def require_dashboard_auth(x_dashboard_key: str | None) -> None:
-    # Keep dashboard/review actions private when key is configured.
+    if dashboard_auth_required():
+        if not DASHBOARD_API_KEY or x_dashboard_key != DASHBOARD_API_KEY:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        return
     if DASHBOARD_API_KEY and x_dashboard_key != DASHBOARD_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1095,6 +1295,9 @@ def checkpoint_to_dict(snapshot) -> dict:
 
 async def process_opened_pr(metadata: dict) -> None:
     review_id = None
+    check_run_id = None
+    repo = metadata.get("repository", "")
+    pr_number = metadata.get("pr_number")
     try:
         pool = app.state.db
         graph = app.state.graph
@@ -1111,12 +1314,23 @@ async def process_opened_pr(metadata: dict) -> None:
                 },
                 "ranked_findings": [],
             }
+            check_run_id = await create_github_check_run(
+                repo,
+                metadata.get("source_sha", ""),
+                review_id,
+                status="completed",
+                conclusion="neutral",
+                output=check_run_output_from_result(queued_result),
+            )
+            if check_run_id is not None:
+                queued_result["github_check_run_id"] = check_run_id
             await update_review(pool, review_id, ReviewStatus.QUEUED.value, queued_result)
             await post_pr_comment(
                 metadata["repository"],
                 metadata["pr_number"],
                 "🤖 Automated review queued because this pull request is still a draft. Analysis will run when it is marked ready for review.",
             )
+            record_review_outcome("queued", repo=repo, pr_number=pr_number, review_id=review_id)
             return
 
         metadata["human_feedback_memory"] = await summarize_human_feedback(
@@ -1146,6 +1360,16 @@ async def process_opened_pr(metadata: dict) -> None:
             )
             return
         review_id = await save_review(pool, pr_context, ReviewStatus.PENDING.value)
+        check_run_id = await create_github_check_run(
+            repo,
+            pr_context.get("source_sha", ""),
+            review_id,
+            status="in_progress",
+            output={
+                "title": "PR review in progress",
+                "summary": "Automated review started.",
+            },
+        )
 
         # Post a quick status comment while analysis continues.
         comment = (
@@ -1169,20 +1393,47 @@ async def process_opened_pr(metadata: dict) -> None:
                 },
                 "ranked_findings": [],
             }
+            if check_run_id is not None:
+                final_result["github_check_run_id"] = check_run_id
+            await sync_github_check_run(
+                repo,
+                pr_context.get("source_sha"),
+                review_id,
+                final_result,
+                existing_check_run_id=check_run_id,
+            )
             await update_review(pool, review_id, ReviewStatus.FAILED.value, final_result)
             await post_pr_comment(
                 metadata["repository"],
                 metadata["pr_number"],
                 "⚠️ Review agent unavailable because required dependencies are missing.",
             )
+            record_review_outcome(
+                "failed",
+                repo=repo,
+                pr_number=pr_number,
+                review_id=review_id,
+                error_type="graph_unavailable",
+            )
         else:
             config = {"configurable": {"thread_id": str(review_id)}}
+            reset_llm_usage()
             graph_state = await asyncio.to_thread(graph.invoke, {"pr_context": pr_context}, config)
+            compact_state = finalize_graph_result(graph_state)
+            if check_run_id is not None:
+                compact_state["github_check_run_id"] = check_run_id
+            await sync_github_check_run(
+                repo,
+                pr_context.get("source_sha"),
+                review_id,
+                compact_state,
+                existing_check_run_id=check_run_id,
+            )
             await update_review(
                 pool,
                 review_id,
                 ReviewStatus.AWAITING_APPROVAL.value,
-                compact_review_state(graph_state),
+                compact_state,
             )
             await post_pr_comment(
                 metadata["repository"],
@@ -1192,6 +1443,12 @@ async def process_opened_pr(metadata: dict) -> None:
                     f"Review ID: `{review_id}`\n"
                     "Use the review API to inspect findings and approve to resume."
                 ),
+            )
+            record_review_outcome(
+                "awaiting_approval",
+                repo=repo,
+                pr_number=pr_number,
+                review_id=review_id,
             )
     except Exception as e:
         # Keep webhook responder fast; report processing failures asynchronously.
@@ -1207,7 +1464,20 @@ async def process_opened_pr(metadata: dict) -> None:
                     "source_sha": metadata.get("source_sha"),
                     "delivery_id": metadata.get("delivery_id"),
                 },
+                "merge_decision": {
+                    "decision": "reject",
+                    "reason": f"Automated review failed: {e}",
+                },
             }
+            if check_run_id is not None:
+                error_payload["github_check_run_id"] = check_run_id
+            await sync_github_check_run(
+                repo,
+                metadata.get("source_sha"),
+                review_id,
+                error_payload,
+                existing_check_run_id=check_run_id,
+            )
             await update_review(
                 app.state.db,
                 review_id,
@@ -1219,6 +1489,13 @@ async def process_opened_pr(metadata: dict) -> None:
             metadata["pr_number"],
             f"⚠️ Automated review failed: `{str(e)}`",
         )
+        record_review_outcome(
+            "failed",
+            repo=repo,
+            pr_number=pr_number,
+            review_id=review_id,
+            error_type=type(e).__name__,
+        )
 
 
 # -----------------------------
@@ -1228,6 +1505,8 @@ async def process_opened_pr(metadata: dict) -> None:
 async def startup() -> None:
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is required")
+    if dashboard_auth_required() and not DASHBOARD_API_KEY:
+        raise RuntimeError("DASHBOARD_API_KEY is required in production")
     app.state.db = await asyncpg.create_pool(DATABASE_URL)
     checkpointer = None
     store = None
@@ -1376,8 +1655,9 @@ async def rerun_from_checkpoint(
             "checkpoint_id": str(checkpoint_id),
         }
     }
+    reset_llm_usage()
     rerun_state = await asyncio.to_thread(app.state.graph.invoke, None, config)
-    compact_rerun_state = compact_review_state(rerun_state)
+    compact_rerun_state = finalize_graph_result(rerun_state)
     previous_state = as_dict(row["result"])
     compact_rerun_state["rerun_comparison"] = compare_findings(
         previous_state.get("ranked_findings", []),
@@ -1452,11 +1732,23 @@ async def approve_review(
         raise HTTPException(status_code=503, detail="Review graph unavailable")
 
     config = {"configurable": {"thread_id": str(id)}}
+    reset_llm_usage()
     final_result = await asyncio.to_thread(app.state.graph.invoke, None, config)
-    compact_final_result = compact_review_state(final_result)
+    compact_final_result = finalize_graph_result(final_result)
+    previous_result = as_dict(row["result"])
+    check_run_id = previous_result.get("github_check_run_id")
+    if check_run_id is not None:
+        compact_final_result["github_check_run_id"] = check_run_id
+    pr_context = as_dict(row["pr_context"])
+    await sync_github_check_run(
+        pr_context.get("repository", row["repo"]),
+        pr_context.get("source_sha"),
+        id,
+        compact_final_result,
+        existing_check_run_id=check_run_id,
+    )
     await update_review(app.state.db, id, ReviewStatus.COMPLETED.value, compact_final_result)
 
-    pr_context = as_dict(row["pr_context"])
     await post_pr_comment(
         pr_context.get("repository", row["repo"]),
         pr_context.get("pr_number", row["pr_number"]),
@@ -1474,6 +1766,12 @@ async def approve_review(
         "inline_comments": inline_summary,
     }
     await update_review_result(app.state.db, id, compact_final_result)
+    record_review_outcome(
+        "completed",
+        repo=pr_context.get("repository", row["repo"]),
+        pr_number=pr_context.get("pr_number", row["pr_number"]),
+        review_id=id,
+    )
     return {"ok": True, "id": id, "status": ReviewStatus.COMPLETED.value, "result": compact_final_result}
 
 
@@ -1549,13 +1847,29 @@ async def reject_review(
         },
     }
 
+    pr_context = as_dict(row["pr_context"])
+    check_run_id = previous_state.get("github_check_run_id")
+    if check_run_id is not None:
+        rejected_result["github_check_run_id"] = check_run_id
+    await sync_github_check_run(
+        pr_context.get("repository", row["repo"]),
+        pr_context.get("source_sha"),
+        id,
+        rejected_result,
+        existing_check_run_id=check_run_id,
+    )
     await update_review(app.state.db, id, ReviewStatus.COMPLETED.value, rejected_result)
 
-    pr_context = as_dict(row["pr_context"])
     await post_pr_comment(
         pr_context.get("repository", row["repo"]),
         pr_context.get("pr_number", row["pr_number"]),
         f"⛔ Human review decision: **reject**\n\nReason: {reason}",
+    )
+    record_review_outcome(
+        "rejected",
+        repo=pr_context.get("repository", row["repo"]),
+        pr_number=pr_context.get("pr_number", row["pr_number"]),
+        review_id=id,
     )
     return {"ok": True, "id": id, "status": ReviewStatus.COMPLETED.value, "result": rejected_result}
 
@@ -1591,13 +1905,29 @@ async def request_changes_review(
         },
     }
 
+    pr_context = as_dict(row["pr_context"])
+    check_run_id = previous_state.get("github_check_run_id")
+    if check_run_id is not None:
+        requested_changes_result["github_check_run_id"] = check_run_id
+    await sync_github_check_run(
+        pr_context.get("repository", row["repo"]),
+        pr_context.get("source_sha"),
+        id,
+        requested_changes_result,
+        existing_check_run_id=check_run_id,
+    )
     await update_review(app.state.db, id, ReviewStatus.COMPLETED.value, requested_changes_result)
 
-    pr_context = as_dict(row["pr_context"])
     await post_pr_comment(
         pr_context.get("repository", row["repo"]),
         pr_context.get("pr_number", row["pr_number"]),
         f"📝 Human review decision: **request changes**\n\nReason: {reason}",
+    )
+    record_review_outcome(
+        "request_changes",
+        repo=pr_context.get("repository", row["repo"]),
+        pr_number=pr_context.get("pr_number", row["pr_number"]),
+        review_id=id,
     )
     return {
         "ok": True,
@@ -1660,6 +1990,11 @@ async def dashboard(x_dashboard_key: str | None = Header(default=None, alias="X-
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/metrics")
+async def metrics():
+    return metrics_response()
 
 
 @app.get("/readyz")

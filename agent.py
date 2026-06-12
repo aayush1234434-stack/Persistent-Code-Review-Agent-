@@ -1,3 +1,4 @@
+import contextvars
 import importlib
 import json
 import logging
@@ -19,7 +20,21 @@ def load_langgraph():
 
 
 StateGraph, END = load_langgraph()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pr_review.agent")
+
+_llm_usage_calls: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "llm_usage_calls",
+    default=None,
+)
+
+# USD per 1M tokens (input, output). Unknown models fall back to zero cost.
+MODEL_TOKEN_PRICING: dict[str, tuple[float, float]] = {
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+}
 
 
 # -----------------------------
@@ -174,15 +189,146 @@ def llm_for_model(model_name: str | None):
     return create_llm(model_name)
 
 
-def invoke_structured(prompt, schema, model_name: str | None = None):
+def reset_llm_usage() -> None:
+    _llm_usage_calls.set([])
+
+
+def _llm_usage_tracker() -> list[dict[str, Any]]:
+    tracker = _llm_usage_calls.get()
+    if tracker is None:
+        tracker = []
+        _llm_usage_calls.set(tracker)
+    return tracker
+
+
+def resolve_model_name(client, explicit_model: str | None = None) -> str:
+    if explicit_model:
+        return explicit_model
+    for attr in ("model_name", "model"):
+        value = getattr(client, attr, None)
+        if value:
+            return str(value)
+    return os.environ.get("OPENAI_REVIEW_MODEL", "gpt-4o-mini")
+
+
+def extract_token_usage(response: Any) -> dict[str, int]:
+    usage_metadata = getattr(response, "usage_metadata", None) or {}
+    if usage_metadata:
+        prompt_tokens = int(
+            usage_metadata.get("input_tokens")
+            or usage_metadata.get("prompt_tokens")
+            or 0
+        )
+        completion_tokens = int(
+            usage_metadata.get("output_tokens")
+            or usage_metadata.get("completion_tokens")
+            or 0
+        )
+        total_tokens = int(usage_metadata.get("total_tokens") or prompt_tokens + completion_tokens)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+    prompt_tokens = int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens") or 0)
+    completion_tokens = int(
+        token_usage.get("completion_tokens") or token_usage.get("output_tokens") or 0
+    )
+    total_tokens = int(token_usage.get("total_tokens") or prompt_tokens + completion_tokens)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def estimate_llm_cost_usd(model_name: str, prompt_tokens: int, completion_tokens: int) -> float:
+    normalized = model_name.lower()
+    pricing = None
+    for key, value in MODEL_TOKEN_PRICING.items():
+        if key in normalized:
+            pricing = value
+            break
+    if pricing is None:
+        return 0.0
+    input_rate, output_rate = pricing
+    return (prompt_tokens * input_rate + completion_tokens * output_rate) / 1_000_000
+
+
+def summarize_llm_usage(calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    usage_calls = calls if calls is not None else list(_llm_usage_tracker())
+    totals = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0,
+        "call_count": len(usage_calls),
+        "failed_calls": 0,
+        "total_latency_ms": 0.0,
+    }
+    by_model: dict[str, dict[str, int | float]] = {}
+    for call in usage_calls:
+        totals["prompt_tokens"] += int(call.get("prompt_tokens", 0))
+        totals["completion_tokens"] += int(call.get("completion_tokens", 0))
+        totals["total_tokens"] += int(call.get("total_tokens", 0))
+        totals["estimated_cost_usd"] += float(call.get("estimated_cost_usd", 0.0))
+        totals["total_latency_ms"] += float(call.get("latency_ms", 0.0))
+        if call.get("status") != "success":
+            totals["failed_calls"] += 1
+        model = str(call.get("model", "unknown"))
+        bucket = by_model.setdefault(
+            model,
+            {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+                "call_count": 0,
+            },
+        )
+        bucket["prompt_tokens"] += int(call.get("prompt_tokens", 0))
+        bucket["completion_tokens"] += int(call.get("completion_tokens", 0))
+        bucket["total_tokens"] += int(call.get("total_tokens", 0))
+        bucket["estimated_cost_usd"] += float(call.get("estimated_cost_usd", 0.0))
+        bucket["call_count"] += 1
+    totals["estimated_cost_usd"] = round(totals["estimated_cost_usd"], 6)
+    totals["total_latency_ms"] = round(totals["total_latency_ms"], 2)
+    return {
+        "calls": usage_calls,
+        "totals": totals,
+        "by_model": by_model,
+    }
+
+
+def merge_llm_usage_into_budget(review_budget: dict[str, Any], usage_summary: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(review_budget or {})
+    merged["llm_usage"] = usage_summary
+    totals = usage_summary.get("totals", {})
+    merged["llm_prompt_tokens"] = totals.get("prompt_tokens", 0)
+    merged["llm_completion_tokens"] = totals.get("completion_tokens", 0)
+    merged["llm_total_tokens"] = totals.get("total_tokens", 0)
+    merged["llm_estimated_cost_usd"] = totals.get("estimated_cost_usd", 0.0)
+    merged["llm_call_count"] = totals.get("call_count", 0)
+    return merged
+
+
+def invoke_structured(prompt, schema, model_name: str | None = None, *, node: str = "structured"):
     target_llm = llm_for_model(model_name)
     if hasattr(target_llm, "with_structured_output"):
         structured_llm = target_llm.with_structured_output(schema)
-        result = invoke_llm_with_retry(prompt, client=structured_llm)
+        result = invoke_llm_with_retry(
+            prompt,
+            client=structured_llm,
+            node=node,
+            model_name=model_name,
+        )
         if isinstance(result, schema):
             return result
         return model_validate(schema, result)
-    response = invoke_llm_with_retry(prompt, client=target_llm)
+    response = invoke_llm_with_retry(prompt, client=target_llm, node=node, model_name=model_name)
     return parse_structured_output(response.content, schema)
 
 
@@ -248,13 +394,74 @@ def system_guard(role: str) -> str:
     )
 
 
-def invoke_llm_with_retry(prompt, retries: int = 3, client=None):
+def _record_llm_usage(
+    *,
+    node: str,
+    model_name: str,
+    status: str,
+    latency_ms: float,
+    usage: dict[str, int],
+) -> None:
+    estimated_cost_usd = estimate_llm_cost_usd(
+        model_name,
+        usage.get("prompt_tokens", 0),
+        usage.get("completion_tokens", 0),
+    )
+    call_record = {
+        "node": node,
+        "model": model_name,
+        "status": status,
+        "latency_ms": round(latency_ms, 2),
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+        "estimated_cost_usd": round(estimated_cost_usd, 6),
+    }
+    _llm_usage_tracker().append(call_record)
+    try:
+        from observability import record_llm_call
+
+        record_llm_call(
+            node=node,
+            model=model_name,
+            status=status,
+            duration_ms=latency_ms,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            estimated_cost_usd=estimated_cost_usd,
+        )
+    except Exception:
+        logger.exception("Failed recording LLM metrics")
+
+
+def invoke_llm_with_retry(prompt, retries: int = 3, client=None, *, node: str = "llm", model_name: str | None = None):
     target = client or llm
+    resolved_model = resolve_model_name(target, model_name)
     last_exc = None
     for attempt in range(1, retries + 1):
+        started = time.perf_counter()
         try:
-            return target.invoke(prompt)
+            response = target.invoke(prompt)
+            latency_ms = (time.perf_counter() - started) * 1000
+            usage = extract_token_usage(response)
+            _record_llm_usage(
+                node=node,
+                model_name=resolved_model,
+                status="success",
+                latency_ms=latency_ms,
+                usage=usage,
+            )
+            return response
         except Exception as exc:
+            latency_ms = (time.perf_counter() - started) * 1000
+            _record_llm_usage(
+                node=node,
+                model_name=resolved_model,
+                status="error",
+                latency_ms=latency_ms,
+                usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            )
             last_exc = exc
             message = str(exc).lower()
             is_transient = any(
@@ -293,7 +500,7 @@ def extract_summary(state: PRfile):
     ]
 
     try:
-        response = invoke_llm_with_retry(prompt)
+        response = invoke_llm_with_retry(prompt, node="extract_summary")
         return {"pr_summary": response.content.strip()}
 
     except Exception as e:
@@ -328,7 +535,12 @@ def classify_files(state: PRfile):
     ]
 
     try:
-        parsed = invoke_structured(prompt, FileClassificationResult, model_name=review_model_for_state(state, "triage"))
+        parsed = invoke_structured(
+            prompt,
+            FileClassificationResult,
+            model_name=review_model_for_state(state, "triage"),
+            node="classify_files",
+        )
         return {"file_classes": [model_dump(file) for file in parsed.files]}
 
     except Exception as e:
@@ -389,6 +601,7 @@ def logic_issues(state: PRfile):
             ),
             FindingResult,
             model_name=review_model_for_state(state),
+            node="logic_issues",
         )
         return {"logic_issues": parse_finding_result(parsed)}
 
@@ -411,6 +624,7 @@ def security_issues(state: PRfile):
             ),
             FindingResult,
             model_name=review_model_for_state(state),
+            node="security_issues",
         )
         return {"security_issues": parse_finding_result(parsed)}
 
@@ -433,6 +647,7 @@ def performance_issues(state: PRfile):
             ),
             FindingResult,
             model_name=review_model_for_state(state),
+            node="performance_issues",
         )
         return {"performance_issues": parse_finding_result(parsed)}
 
@@ -455,6 +670,7 @@ def contract_issues(state: PRfile):
             ),
             FindingResult,
             model_name=review_model_for_state(state),
+            node="contract_issues",
         )
         return {"contract_issues": parse_finding_result(parsed)}
 
@@ -478,6 +694,7 @@ def test_evaluation(state: PRfile):
             ),
             FindingResult,
             model_name=review_model_for_state(state),
+            node="test_evaluation",
         )
         return {"test_evaluation": parse_finding_result(parsed)}
 

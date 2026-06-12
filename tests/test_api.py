@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import importlib
 import json
 
 import asyncpg
@@ -42,6 +43,16 @@ def api_client(monkeypatch):
     monkeypatch.setattr(main, "post_pr_comment", noop_post)
     monkeypatch.setattr(main, "post_inline_review_comments", noop_inline)
 
+    async def noop_check_run(*_args, **_kwargs):
+        return None
+
+    async def noop_sync_check_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main, "create_github_check_run", noop_check_run)
+    monkeypatch.setattr(main, "sync_github_check_run", noop_sync_check_run)
+    monkeypatch.setattr(main, "ENVIRONMENT", "development")
+
     with TestClient(main.app) as client:
         yield client, fake_pool
 
@@ -79,6 +90,35 @@ def test_readyz(api_client):
     response = client.get("/readyz")
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+
+
+def test_metrics_endpoint(api_client):
+    client, _ = api_client
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "pr_review_http_requests_total" in response.text
+
+
+def test_production_startup_requires_dashboard_key(monkeypatch):
+    fake_pool = FakePool()
+
+    async def fake_create_pool(*_args, **_kwargs):
+        return fake_pool
+
+    def fake_import_module(name, package=None):
+        if name.startswith("langgraph.checkpoint") or name.startswith("langgraph.store"):
+            raise ModuleNotFoundError(name)
+        return importlib.import_module(name, package)
+
+    monkeypatch.setattr(asyncpg, "create_pool", fake_create_pool)
+    monkeypatch.setattr(main.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(main, "ENVIRONMENT", "production")
+    monkeypatch.setattr(main, "DASHBOARD_API_KEY", None)
+    monkeypatch.setattr(main, "DATABASE_URL", "postgresql://test/test")
+
+    with pytest.raises(RuntimeError, match="DASHBOARD_API_KEY is required"):
+        with TestClient(main.app):
+            pass
 
 
 def test_github_webhook_valid_signature(api_client):

@@ -11,12 +11,20 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pr_user -d pr_review"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   app:
     build: .
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -25,6 +33,12 @@ services:
       HTTP_TIMEOUT_SECONDS: 20
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     command: >
       sh -c "python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
 
