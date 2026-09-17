@@ -49,6 +49,26 @@ LLM_COST = Counter(
     "pr_review_llm_estimated_cost_usd_total",
     "Estimated LLM spend in USD",
 )
+REVIEW_JOB_EVENTS = Counter(
+    "pr_review_job_events_total",
+    "Durable review job lifecycle events",
+    ["event", "status"],
+)
+REVIEW_TIME_TO_REVIEW = Histogram(
+    "pr_review_time_to_review_seconds",
+    "End-to-end review analysis time in seconds",
+    buckets=(1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1200),
+)
+REVIEW_COST = Histogram(
+    "pr_review_cost_usd",
+    "Estimated LLM cost per PR review in USD",
+    buckets=(0.0001, 0.001, 0.005, 0.01, 0.05, 0.10, 0.25, 0.50, 1.0, 5.0),
+)
+FINDING_FEEDBACK = Counter(
+    "pr_review_finding_feedback_total",
+    "Human feedback on review findings",
+    ["verdict", "category"],
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -78,6 +98,9 @@ class JsonFormatter(logging.Formatter):
             "path",
             "status_code",
             "error_type",
+            "job_id",
+            "attempt",
+            "retry_in_seconds",
         ):
             if hasattr(record, key):
                 value = getattr(record, key)
@@ -105,6 +128,41 @@ def log_event(level: int, event: str, message: str, **fields: Any) -> None:
 def record_review_outcome(outcome: str, **fields: Any) -> None:
     REVIEWS_TOTAL.labels(outcome=outcome).inc()
     log_event(logging.INFO, "review_outcome", f"Review {outcome}", status=outcome, **fields)
+
+
+def record_review_job_event(event: str, status: str, **fields: Any) -> None:
+    REVIEW_JOB_EVENTS.labels(event=event, status=status).inc()
+    log_event(
+        logging.INFO if status not in {"retry", "failed"} else logging.WARNING,
+        "review_job",
+        f"Review job {event}: {status}",
+        status=status,
+        **fields,
+    )
+
+
+def record_review_evaluation(duration_ms: float, estimated_cost_usd: float, **fields: Any) -> None:
+    REVIEW_TIME_TO_REVIEW.observe(max(float(duration_ms), 0.0) / 1000.0)
+    REVIEW_COST.observe(max(float(estimated_cost_usd), 0.0))
+    log_event(
+        logging.INFO,
+        "review_evaluation",
+        "Recorded review latency and cost",
+        duration_ms=round(duration_ms, 2),
+        estimated_cost_usd=round(estimated_cost_usd, 6),
+        **fields,
+    )
+
+
+def record_finding_feedback_metric(verdict: str, category: str, **fields: Any) -> None:
+    FINDING_FEEDBACK.labels(verdict=verdict, category=category or "general").inc()
+    log_event(
+        logging.INFO,
+        "finding_feedback",
+        "Recorded human finding feedback",
+        status=verdict,
+        **fields,
+    )
 
 
 def record_llm_call(

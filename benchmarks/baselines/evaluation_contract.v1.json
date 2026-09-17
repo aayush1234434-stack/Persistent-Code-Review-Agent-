@@ -1,0 +1,27 @@
+{
+  "name": "phase4-real-world-pr-gate",
+  "corpus": "benchmarks/corpus/real_world_prs.v1.jsonl",
+  "case_count": 120,
+  "corpus_fingerprint": "679a0ee195d7083ec0382b09eb1ce23027f447bd2faaf11ad9089f6ebb0afc1c",
+  "provenance": {
+    "schema_version": "1.0",
+    "pricing_version": "openai-standard-2026-09-17",
+    "prompt_fingerprint": "e5abc94404e40a75dbe025b4a7b1be83d55a542f7c515dbe6ca3565089b62a77",
+    "model_policy_fingerprint": "e8871a55180bcb21cf2f888b729de88c647b51130ee9e0f63a55b37123a53993",
+    "model_policy": {
+      "triage_model": "gpt-4o-mini",
+      "review_model": "gpt-4o-mini",
+      "strong_model": "gpt-4o"
+    }
+  },
+  "thresholds": {
+    "min_coverage": 1.0,
+    "min_precision": 0.6,
+    "min_recall": 0.5,
+    "min_f1": 0.55,
+    "max_false_positive_rate": 0.4,
+    "max_expected_calibration_error": 0.2
+  },
+  "baseline_status": "contract_only_until_first_live_120_case_run",
+  "instructions": "Run benchmarks/run_live_benchmark.py across all 120 cases, score it with benchmarks/evaluate.py, review failures, then replace this contract-only baseline with the accepted measured report."
+}

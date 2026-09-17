@@ -1,0 +1,43 @@
+rules:
+  - id: python-dangerous-eval
+    languages: [python]
+    message: Dynamic evaluation can execute attacker-controlled code.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+
+  - id: python-subprocess-shell-true
+    languages: [python]
+    message: shell=True can introduce command injection when input is not fully trusted.
+    severity: ERROR
+    pattern: subprocess.$F(..., shell=True, ...)
+
+  - id: python-unsafe-yaml-load
+    languages: [python]
+    message: Use yaml.safe_load for untrusted YAML input.
+    severity: WARNING
+    pattern: yaml.load(...)
+
+  - id: python-weak-random-security
+    languages: [python]
+    message: Use the secrets module for security-sensitive random values.
+    severity: WARNING
+    pattern-either:
+      - pattern: random.random(...)
+      - pattern: random.randint(...)
+
+  - id: javascript-dangerous-eval
+    languages: [javascript, typescript]
+    message: Dynamic evaluation can execute attacker-controlled code.
+    severity: ERROR
+    pattern: eval(...)
+
+  - id: javascript-child-process-exec
+    languages: [javascript, typescript]
+    message: Prefer argument-vector process APIs over shell command execution.
+    severity: WARNING
+    pattern-either:
+      - pattern: child_process.exec(...)
+      - pattern: $CP.exec(...)
