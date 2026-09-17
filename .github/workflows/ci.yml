@@ -31,3 +31,9 @@ jobs:
 
       - name: Run PR review benchmarks
         run: python benchmarks/pr_review_benchmark.py
+
+      - name: Validate 120-PR evaluation corpus and prompt/model contract
+        run: >-
+          python benchmarks/evaluate.py
+          --validate-only
+          --contract benchmarks/baselines/evaluation_contract.v1.json

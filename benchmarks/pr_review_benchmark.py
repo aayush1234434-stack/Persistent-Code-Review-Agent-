@@ -43,6 +43,7 @@ def run_analysis_pipeline(case: dict, pr_context: dict) -> dict:
 
     state.update(agent.rank_findings(state))
     state.update(agent.verify_findings_grounded(state))
+    state.update(agent.classify_finding_lifecycle(state))
     state.update(agent.merge_decision(state))
 
     ranked = state.get("ranked_findings", [])

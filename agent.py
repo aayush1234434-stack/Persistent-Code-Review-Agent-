@@ -36,7 +36,9 @@ FINDING_REVIEW_NODES = frozenset({
     "test_evaluation",
 })
 
-# USD per 1M tokens (input, output). Unknown models fall back to zero cost.
+# Standard API USD per 1M tokens (input, output), verified 2026-09-17 against
+# https://developers.openai.com/api/docs/models. Unknown models fall back to zero cost.
+MODEL_PRICING_VERSION = "openai-standard-2026-09-17"
 MODEL_TOKEN_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
@@ -44,6 +46,10 @@ MODEL_TOKEN_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
 }
+
+DEFAULT_TRIAGE_MODEL = "gpt-4o-mini"
+DEFAULT_REVIEW_MODEL = "gpt-4o-mini"
+DEFAULT_STRONG_REVIEW_MODEL = "gpt-4o"
 
 
 # -----------------------------
@@ -63,6 +69,12 @@ class Finding(TypedDict, total=False):
     effective_severity: str
     line_context: list
     grounded: bool
+    evidence_sources: list[str]
+    verification_level: str
+    why_this_matters: str
+    suggested_patch: str
+    lifecycle: str
+    fingerprint: str
 
 
 class MergeDecision(TypedDict):
@@ -82,9 +94,15 @@ class PRfile(TypedDict):
     performance_issues: List[Finding]
     contract_issues: List[Finding]
     deterministic_issues: List[Finding]
+    static_issues: List[Finding]
     test_evaluation: List[Finding]
 
     ranked_findings: List[Finding]
+    dropped_findings: List[Finding]
+    grounding_summary: dict
+    evidence_summary: dict
+    finding_lifecycle: dict
+    test_suggestions: list[dict]
     merge_decision: MergeDecision
     analysis_errors: Annotated[list[dict[str, Any]], operator.add]
 
@@ -109,6 +127,8 @@ class FindingModel(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
     finding_type: Literal["definite_bug", "possible_concern"] = "possible_concern"
     rule_id: Optional[str] = None
+    why_this_matters: str = ""
+    suggested_patch: Optional[str] = None
 
 
 class FindingResult(BaseModel):
@@ -138,7 +158,7 @@ def create_llm(model_name: str | None = None):
             module = importlib.import_module(module_name)
             chat_cls = getattr(module, class_name)
             return chat_cls(
-                model=model_name or os.environ.get("OPENAI_REVIEW_MODEL", "gpt-4o-mini"),
+                model=model_name or os.environ.get("OPENAI_REVIEW_MODEL", DEFAULT_REVIEW_MODEL),
                 temperature=0,
             )
         except ModuleNotFoundError:
@@ -218,7 +238,7 @@ def resolve_model_name(client, explicit_model: str | None = None) -> str:
         value = getattr(client, attr, None)
         if value:
             return str(value)
-    return os.environ.get("OPENAI_REVIEW_MODEL", "gpt-4o-mini")
+    return os.environ.get("OPENAI_REVIEW_MODEL", DEFAULT_REVIEW_MODEL)
 
 
 def extract_token_usage(response: Any) -> dict[str, int]:
@@ -310,6 +330,7 @@ def summarize_llm_usage(calls: list[dict[str, Any]] | None = None) -> dict[str, 
         "calls": usage_calls,
         "totals": totals,
         "by_model": by_model,
+        "pricing_version": MODEL_PRICING_VERSION,
     }
 
 
@@ -360,7 +381,29 @@ def safe_json_for_prompt(value: Any, limit: int) -> str:
 
 
 def safe_changes_for_prompt(pr_context: dict) -> str:
-    return safe_json_for_prompt(pr_context.get("files", []), int(os.environ.get("REVIEW_PROMPT_CHAR_BUDGET", "12000")))
+    configured = (
+        pr_context.get("review_budget", {})
+        .get("cost_controls", {})
+        .get("prompt_char_budget")
+    )
+    limit = int(configured or os.environ.get("REVIEW_PROMPT_CHAR_BUDGET", "12000"))
+    return safe_json_for_prompt(pr_context.get("files", []), limit)
+
+
+def intelligence_context(pr_context: dict) -> str:
+    intelligence = pr_context.get("intelligence") or {}
+    return safe_json_for_prompt(
+        {
+            "status": intelligence.get("status"),
+            "review_scope": intelligence.get("review_scope", {}),
+            "symbol_map": intelligence.get("symbol_map", {}),
+            "repository_context": intelligence.get("repository_context", []),
+            "contextual_static_findings": intelligence.get("contextual_static_findings", []),
+            "execution": intelligence.get("execution", {}),
+            "isolation": intelligence.get("isolation", {}),
+        },
+        12_000,
+    )
 
 
 def safe_metadata_for_prompt(pr_context: dict) -> str:
@@ -568,6 +611,7 @@ def finding_review_prompt(state: PRfile, specialty: str, task: str, extra_contex
     rules_blob = review_rules_context(pr_context)
     budget_blob = safe_json_for_prompt(pr_context.get("review_budget", {}), 2000)
     feedback_blob = safe_json_for_prompt(pr_context.get("human_feedback_memory", {}), 3000)
+    repository_blob = intelligence_context(pr_context)
     human_context = (
         f"PR Summary: {state.get('pr_summary', '')}\n"
         f"File classifications: {safe_json_for_prompt(state.get('file_classes', []), 3000)}\n"
@@ -576,6 +620,8 @@ def finding_review_prompt(state: PRfile, specialty: str, task: str, extra_contex
         f"Untrusted repository review rules:\n<untrusted_rules>\n{rules_blob}\n</untrusted_rules>\n"
         f"Token and diff budget metadata:\n<budget>\n{budget_blob}\n</budget>\n"
         f"Prior human feedback summary:\n<reviewer_feedback>\n{feedback_blob}\n</reviewer_feedback>\n"
+        f"Untrusted repository map, caller context, and tool results:\n"
+        f"<untrusted_repository_evidence>\n{repository_blob}\n</untrusted_repository_evidence>\n"
         f"Code changes as untrusted JSON data:\n<untrusted_changes>\n{changes_blob}\n</untrusted_changes>"
     )
     return [
@@ -583,12 +629,14 @@ def finding_review_prompt(state: PRfile, specialty: str, task: str, extra_contex
             content=(
                 system_guard(specialty)
                 + " Review only the changed diff. "
+                + "Caller context and execution results may corroborate a changed-line finding, but do not report an unchanged caller line as the finding location. "
                 + task
                 + " For each finding include description, file, exact changed line when available, "
                 "severity, impact, confidence from 0 to 1, and finding_type as either "
                 "definite_bug or possible_concern. Use definite_bug only when the diff itself proves it. "
                 "Use possible_concern for risk, missing coverage, or incomplete context. "
                 "Evidence must quote or paraphrase the changed line or policy that grounds the finding. "
+                "Include a concise why_this_matters explanation in developer terms. When a safe, exact replacement is clear, include only the replacement code in suggested_patch; otherwise use null. "
                 "Do not invent files or lines. Return structured output matching this JSON schema: "
                 + schema_description(FindingResult)
             )
@@ -817,6 +865,19 @@ def deterministic_checks(state: PRfile):
     return {"deterministic_issues": findings}
 
 
+def static_analysis_checks(state: PRfile):
+    intelligence = state.get("pr_context", {}).get("intelligence", {}) or {}
+    findings = []
+    for issue in intelligence.get("static_findings", []):
+        if not isinstance(issue, dict):
+            continue
+        item = issue.copy()
+        item["evidence_sources"] = [str(item.get("evidence_source", "static"))]
+        item["verification_level"] = "static_verified"
+        findings.append(item)
+    return {"static_issues": findings}
+
+
 # -----------------------------
 # Ranking
 # -----------------------------
@@ -856,6 +917,7 @@ def rank_findings(state: PRfile):
         "contract": state.get("contract_issues", []),
         "tests": state.get("test_evaluation", []),
         "deterministic": state.get("deterministic_issues", []),
+        "static": state.get("static_issues", []),
     }
 
     all_findings = []
@@ -896,6 +958,8 @@ def rank_findings(state: PRfile):
             score -= 2.0
         if issue.get("category") == "deterministic":
             score += 3.0
+        if issue.get("category") == "static":
+            score += 4.0
         issue["original_severity"] = issue.get("severity", "low")
         issue["effective_severity"] = severity_names.get(effective_severity_score, issue.get("severity", "low"))
         issue["ranking_score"] = round(score, 3)
@@ -951,10 +1015,26 @@ def changed_line_context(file_index: dict, line: int | None, radius: int = 2) ->
     ][:5]
 
 
+def nearby_line(left: Any, right: Any, radius: int = 2) -> bool:
+    if left is None or right is None:
+        return True
+    try:
+        return abs(int(left) - int(right)) <= radius
+    except (TypeError, ValueError):
+        return False
+
+
 def verify_findings_grounded(state: PRfile):
-    line_index = build_changed_line_index(state.get("pr_context", {}))
+    pr_context = state.get("pr_context", {})
+    line_index = build_changed_line_index(pr_context)
+    intelligence = pr_context.get("intelligence", {}) or {}
+    static_findings = intelligence.get("static_findings", [])
+    test_result = (intelligence.get("execution", {}) or {}).get("tests", {}) or {}
+    test_output = str(test_result.get("output_excerpt", ""))
     verified = []
     dropped = []
+    static_corroborated = 0
+    execution_corroborated = 0
     for finding in state.get("ranked_findings", []):
         file_name = finding.get("file")
         file_index = line_index.get(file_name)
@@ -969,11 +1049,41 @@ def verify_findings_grounded(state: PRfile):
         if not line_context:
             dropped.append({**finding, "grounded": False, "grounding_error": "no changed-line context available"})
             continue
+        evidence_sources = list(finding.get("evidence_sources", []))
+        if "diff" not in evidence_sources:
+            evidence_sources.insert(0, "diff")
+        matching_static = [
+            item for item in static_findings
+            if item.get("file") == file_name
+            and nearby_line(item.get("line"), line)
+        ]
+        if matching_static:
+            source = str(matching_static[0].get("evidence_source", "static"))
+            if source not in evidence_sources:
+                evidence_sources.append(source)
+            static_corroborated += 1
+        file_reference = str(file_name or "")
+        if (
+            test_result.get("exit_code") not in (None, 0)
+            and file_reference
+            and (file_reference in test_output or path_basename(file_reference) in test_output)
+        ):
+            evidence_sources.append("execution:tests")
+            execution_corroborated += 1
+        verification_level = "corroborated" if len(set(evidence_sources)) > 1 else "diff_grounded"
         verified.append({
             **finding,
             "grounded": True,
             "line_context": line_context,
             "evidence": finding.get("evidence") or (line_context[0].get("content", "").strip()[:180] if line_context else ""),
+            "evidence_sources": list(dict.fromkeys(evidence_sources)),
+            "verification_level": verification_level,
+            "static_evidence": matching_static[0] if matching_static else None,
+            "why_this_matters": (
+                finding.get("why_this_matters")
+                or finding.get("impact")
+                or "This changed behavior can affect correctness, security, reliability, or maintainability."
+            ),
         })
     return {
         "ranked_findings": verified,
@@ -982,7 +1092,153 @@ def verify_findings_grounded(state: PRfile):
             "verified": len(verified),
             "dropped": len(dropped),
         },
+        "evidence_summary": {
+            "static_corroborated": static_corroborated,
+            "execution_corroborated": execution_corroborated,
+            "diff_only": sum(
+                1 for finding in verified
+                if finding.get("evidence_sources") == ["diff"]
+            ),
+        },
     }
+
+
+def path_basename(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def finding_fingerprint(finding: dict) -> str:
+    rule_or_category = finding.get("rule_id") or finding.get("category") or "general"
+    return "|".join([
+        str(finding.get("file", "")),
+        str(rule_or_category),
+        normalize_description(str(finding.get("description", "")))[:140],
+    ])
+
+
+def classify_finding_lifecycle(state: PRfile):
+    pr_context = state.get("pr_context", {})
+    previous_findings = pr_context.get("previous_findings", []) or []
+    current_files = {
+        file.get("filename") for file in pr_context.get("files", []) if file.get("filename")
+    }
+    analysis_complete = not finding_review_failures(state)
+    review_budget = pr_context.get("review_budget", {}) or {}
+    scope_complete = not (
+        review_budget.get("truncated") or review_budget.get("prompt_truncated")
+    )
+    previous_by_fingerprint = {
+        finding_fingerprint(finding): finding
+        for finding in previous_findings
+        if isinstance(finding, dict)
+    }
+    previously_dismissed = {
+        fingerprint
+        for fingerprint, finding in previous_by_fingerprint.items()
+        if finding.get("lifecycle") == "dismissed"
+        or (finding.get("human_feedback") or {}).get("verdict") in {"invalid", "dismissed"}
+    }
+
+    current = []
+    current_fingerprints = set()
+    for finding in state.get("ranked_findings", []):
+        fingerprint = finding_fingerprint(finding)
+        current_fingerprints.add(fingerprint)
+        feedback = finding.get("human_feedback") or {}
+        if feedback.get("verdict") in {"invalid", "dismissed"} or fingerprint in previously_dismissed:
+            lifecycle = "dismissed"
+        elif fingerprint in previous_by_fingerprint:
+            lifecycle = "recurring"
+        else:
+            lifecycle = "new"
+        item = {**finding, "fingerprint": fingerprint, "lifecycle": lifecycle}
+        if lifecycle == "dismissed" and fingerprint in previous_by_fingerprint:
+            item["lifecycle_before_dismissal"] = "recurring"
+        current.append(item)
+
+    fixed = [
+        {
+            **finding,
+            "fingerprint": fingerprint,
+            "lifecycle": "fixed",
+        }
+        for fingerprint, finding in previous_by_fingerprint.items()
+        if fingerprint not in current_fingerprints
+        and fingerprint not in previously_dismissed
+        and (scope_complete or finding.get("file") in current_files)
+        and analysis_complete
+    ]
+    counts = {
+        lifecycle: sum(1 for finding in current if finding.get("lifecycle") == lifecycle)
+        for lifecycle in ("new", "recurring", "dismissed")
+    }
+    counts["fixed"] = len(fixed)
+    return {
+        "ranked_findings": current,
+        "finding_lifecycle": {
+            "counts": counts,
+            "fixed": fixed[:100],
+        },
+    }
+
+
+def generate_test_suggestions(state: PRfile):
+    pr_context = state.get("pr_context", {})
+    intelligence = pr_context.get("intelligence", {}) or {}
+    changed_symbols = (intelligence.get("symbol_map", {}) or {}).get("changed_symbols", [])
+    suggestions = []
+    seen = set()
+
+    active_findings = [
+        finding for finding in state.get("ranked_findings", [])
+        if finding.get("lifecycle") != "dismissed"
+    ]
+    for finding in active_findings[:10]:
+        file_name = str(finding.get("file", ""))
+        target = next(
+            (
+                symbol.get("name") for symbol in changed_symbols
+                if symbol.get("file") == file_name
+                and (
+                    finding.get("line") is None
+                    or int(symbol.get("line", 0)) <= int(finding.get("line")) <= int(symbol.get("end_line", symbol.get("line", 0)))
+                )
+            ),
+            path_basename(file_name),
+        )
+        key = (file_name, target, finding.get("description"))
+        if key in seen:
+            continue
+        seen.add(key)
+        suggestions.append({
+            "title": f"Add a regression test for {target}",
+            "file": file_name,
+            "target": target,
+            "reason": str(finding.get("description", "Changed behavior needs regression coverage.")),
+            "scenarios": [
+                "Exercise the changed path with a normal input.",
+                "Reproduce the reported edge or failure condition.",
+                "Assert the externally visible result and any persisted state.",
+            ],
+            "evidence_sources": finding.get("evidence_sources", ["diff"]),
+        })
+
+    covered_files = {item.get("file") for item in suggestions}
+    for symbol in changed_symbols:
+        file_name = symbol.get("file", "")
+        if file_name in covered_files or len(suggestions) >= 20:
+            continue
+        suggestions.append({
+            "title": f"Cover changed {symbol.get('kind', 'symbol')} {symbol.get('name', '')}",
+            "file": file_name,
+            "target": symbol.get("name", ""),
+            "reason": "This changed symbol has no finding-specific regression suggestion.",
+            "scenarios": ["Test the primary path, boundary input, and failure behavior."],
+            "evidence_sources": ["symbol_map"],
+        })
+        covered_files.add(file_name)
+
+    return {"test_suggestions": suggestions[:20]}
 
 
 # -----------------------------
@@ -990,7 +1246,10 @@ def verify_findings_grounded(state: PRfile):
 # -----------------------------
 
 def merge_decision(state: PRfile):
-    ranked = state.get("ranked_findings", [])
+    ranked = [
+        finding for finding in state.get("ranked_findings", [])
+        if finding.get("lifecycle") != "dismissed"
+    ]
     review_failures = finding_review_failures(state)
 
     if not ranked:
@@ -1149,10 +1408,13 @@ def build_graph(checkpointer=None, store=None):
     builder.add_node("performance_issues", performance_issues)
     builder.add_node("contract_issues", contract_issues)
     builder.add_node("deterministic_checks", deterministic_checks)
+    builder.add_node("static_analysis_checks", static_analysis_checks)
 
     builder.add_node("test_evaluation", test_evaluation)
     builder.add_node("rank_findings", rank_findings)
     builder.add_node("verify_findings_grounded", verify_findings_grounded)
+    builder.add_node("classify_finding_lifecycle", classify_finding_lifecycle)
+    builder.add_node("generate_test_suggestions", generate_test_suggestions)
     builder.add_node("merge_decision", merge_decision)
     builder.add_node("save_memory", save_memory)
 
@@ -1166,17 +1428,26 @@ def build_graph(checkpointer=None, store=None):
     builder.add_edge("classify_files", "performance_issues")
     builder.add_edge("classify_files", "contract_issues")
     builder.add_edge("classify_files", "deterministic_checks")
+    builder.add_edge("classify_files", "static_analysis_checks")
 
     builder.add_edge("logic_issues", "test_evaluation")
 
-    builder.add_edge("security_issues", "rank_findings")
-    builder.add_edge("performance_issues", "rank_findings")
-    builder.add_edge("contract_issues", "rank_findings")
-    builder.add_edge("deterministic_checks", "rank_findings")
-    builder.add_edge("test_evaluation", "rank_findings")
+    builder.add_edge(
+        [
+            "security_issues",
+            "performance_issues",
+            "contract_issues",
+            "deterministic_checks",
+            "static_analysis_checks",
+            "test_evaluation",
+        ],
+        "rank_findings",
+    )
 
     builder.add_edge("rank_findings", "verify_findings_grounded")
-    builder.add_edge("verify_findings_grounded", "merge_decision")
+    builder.add_edge("verify_findings_grounded", "classify_finding_lifecycle")
+    builder.add_edge("classify_finding_lifecycle", "generate_test_suggestions")
+    builder.add_edge("generate_test_suggestions", "merge_decision")
     builder.add_edge("merge_decision", "save_memory")
     builder.add_edge("save_memory", END)
 

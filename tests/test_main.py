@@ -1,11 +1,13 @@
 import hashlib
 import hmac
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
 
 import agent
 import main
+from tests.fakes import FakePool
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +223,55 @@ def test_build_queued_pr_context_for_draft_pr():
     assert context["review_budget"]["total_files_seen"] == 0
 
 
+def test_review_versions_are_idempotent_per_source_sha():
+    pool = FakePool()
+    metadata = {
+        "pr_number": 7,
+        "title": "Parser",
+        "description": "",
+        "author": "alice",
+        "action": "opened",
+        "url": "https://example/pr/7",
+        "source_branch": "feature",
+        "source_sha": "sha-one",
+        "target_branch": "main",
+        "target_sha": "base",
+        "repository": "org/repo",
+        "draft": False,
+    }
+
+    async def scenario():
+        first_context = main.build_queued_pr_context(metadata)
+        first, first_created = await main.get_or_create_review_version(
+            pool,
+            first_context,
+            main.ReviewStatus.PENDING.value,
+            "delivery-1",
+        )
+        duplicate, duplicate_created = await main.get_or_create_review_version(
+            pool,
+            first_context,
+            main.ReviewStatus.PENDING.value,
+            "delivery-2",
+        )
+        second_context = main.build_queued_pr_context({**metadata, "source_sha": "sha-two"})
+        second, second_created = await main.get_or_create_review_version(
+            pool,
+            second_context,
+            main.ReviewStatus.PENDING.value,
+            "delivery-3",
+        )
+        return first, first_created, duplicate, duplicate_created, second, second_created
+
+    first, first_created, duplicate, duplicate_created, second, second_created = asyncio.run(scenario())
+    assert first_created is True
+    assert duplicate_created is False
+    assert duplicate["id"] == first["id"]
+    assert first["review_version"] == 1
+    assert second_created is True
+    assert second["review_version"] == 2
+
+
 def test_compare_findings_reports_added_removed_unchanged():
     old = [
         {"file": "a.py", "line": 1, "description": "same"},
@@ -369,3 +420,162 @@ def test_diff_position_for_finding():
         }]
     }
     assert main.diff_position_for_finding(pr_context, {"file": "app.py", "line": 12}) == 7
+
+
+def test_finding_lifecycle_tracks_new_recurring_fixed_and_dismissed():
+    previous = [
+        {"file": "a.py", "description": "Recurring bug", "category": "logic"},
+        {"file": "b.py", "description": "Fixed bug", "category": "security"},
+        {
+            "file": "c.py",
+            "description": "Known false positive",
+            "category": "logic",
+            "human_feedback": {"verdict": "dismissed"},
+        },
+    ]
+    current = [
+        {"file": "a.py", "description": "Recurring bug", "category": "logic"},
+        {"file": "c.py", "description": "Known false positive", "category": "logic"},
+        {"file": "d.py", "description": "Brand new bug", "category": "logic"},
+    ]
+
+    result = agent.classify_finding_lifecycle({
+        "pr_context": {
+            "previous_findings": previous,
+            "files": [{"filename": name} for name in ("a.py", "b.py", "c.py", "d.py")],
+        },
+        "ranked_findings": current,
+        "analysis_errors": [],
+    })
+
+    assert [finding["lifecycle"] for finding in result["ranked_findings"]] == [
+        "recurring",
+        "dismissed",
+        "new",
+    ]
+    assert result["finding_lifecycle"]["counts"] == {
+        "new": 1,
+        "recurring": 1,
+        "dismissed": 1,
+        "fixed": 1,
+    }
+    assert result["finding_lifecycle"]["fixed"][0]["file"] == "b.py"
+
+
+def test_merge_decision_ignores_dismissed_findings():
+    decision = agent.merge_decision({
+        "ranked_findings": [{
+            "file": "app.py",
+            "description": "Dismissed",
+            "category": "security",
+            "severity": "critical",
+            "lifecycle": "dismissed",
+        }],
+        "analysis_errors": [],
+    })["merge_decision"]
+    assert decision["decision"] == "approve"
+
+
+def test_persisted_dismissal_is_applied_when_graph_resumes():
+    finding = {
+        "file": "app.py",
+        "line": 4,
+        "description": "Unsafe operation",
+        "category": "security",
+        "severity": "critical",
+        "effective_severity": "critical",
+    }
+    merged = main.apply_persisted_finding_feedback(
+        {"ranked_findings": [finding], "analysis_errors": []},
+        {
+            "ranked_findings": [{
+                **finding,
+                "lifecycle": "dismissed",
+                "human_feedback": {"verdict": "dismissed"},
+            }],
+            "finding_feedback": {"0": {"verdict": "dismissed"}},
+        },
+        recompute_decision=True,
+    )
+
+    assert merged["ranked_findings"][0]["lifecycle"] == "dismissed"
+    assert merged["merge_decision"]["decision"] == "approve"
+
+
+def test_risk_heatmap_and_baseline_report_improvement():
+    previous = [{"file": "app.py", "severity": "critical", "confidence": 1.0}]
+    current = [{"file": "app.py", "severity": "medium", "confidence": 1.0, "category": "logic"}]
+
+    baseline = main.risk_baseline(previous, current)
+    heatmap = main.file_risk_heatmap(
+        {"files": [{"filename": "app.py"}, {"filename": "clean.py"}]},
+        current,
+    )
+
+    assert baseline["direction"] == "improved"
+    assert baseline["delta"] == -7.0
+    assert "improved" in baseline["statement"]
+    assert heatmap[0]["file"] == "app.py"
+    assert heatmap[0]["level"] == "medium"
+    assert heatmap[1]["level"] == "none"
+
+
+def test_inline_comment_includes_why_and_suggested_patch(monkeypatch):
+    posted = []
+
+    async def fake_post(*args, **kwargs):
+        posted.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(main, "post_inline_review_comment", fake_post)
+    summary = asyncio.run(main.post_inline_review_comments(
+        "org/repo",
+        1,
+        {
+            "source_sha": "abc",
+            "files": [{
+                "filename": "app.py",
+                "added_line_details": [{"line": 4, "diff_position": 2, "content": "except:"}],
+                "removed_line_details": [],
+            }],
+        },
+        [{
+            "file": "app.py",
+            "line": 4,
+            "severity": "medium",
+            "description": "Avoid a bare exception handler",
+            "why_this_matters": "It hides operational failures.",
+            "suggested_patch": "except Exception:",
+            "lifecycle": "new",
+        }],
+    ))
+
+    assert summary["posted"] == 1
+    body = posted[0]["args"][5]
+    assert "Why this matters" in body
+    assert "```suggestion\nexcept Exception:\n```" in body
+
+
+def test_full_graph_parallel_reviewers_join_once():
+    graph = agent.build_graph()
+    state = graph.invoke({
+        "pr_context": {
+            "repository": "org/repo",
+            "title": "Join smoke test",
+            "description": "",
+            "author": "alice",
+            "files": [{
+                "filename": "app.py",
+                "added_line_details": [{"line": 1, "content": "value = 1"}],
+                "removed_line_details": [],
+            }],
+            "previous_findings": [],
+            "intelligence": {"static_findings": [], "symbol_map": {"changed_symbols": []}},
+        }
+    })
+
+    assert state["finding_lifecycle"]["counts"] == {
+        "new": 0,
+        "recurring": 0,
+        "dismissed": 0,
+        "fixed": 0,
+    }

@@ -1,8 +1,7 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: pr_review
       POSTGRES_USER: pr_user
@@ -20,6 +19,7 @@ services:
 
   app:
     build: .
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -31,6 +31,8 @@ services:
       DASHBOARD_API_KEY: ${DASHBOARD_API_KEY}
       DATABASE_URL: postgresql://pr_user:pr_pass@db:5432/pr_review
       HTTP_TIMEOUT_SECONDS: 20
+      GITHUB_CHECK_RUN_NAME: ${GITHUB_CHECK_RUN_NAME:-PR Reviewer}
+      REVIEW_WORKER_ENABLED: "false"
     ports:
       - "8000:8000"
     healthcheck:
@@ -39,8 +41,73 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    command: >
-      sh -c "python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+    command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      sandbox:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DASHBOARD_API_KEY: ${DASHBOARD_API_KEY}
+      DATABASE_URL: postgresql://pr_user:pr_pass@db:5432/pr_review
+      HTTP_TIMEOUT_SECONDS: 20
+      GITHUB_CHECK_RUN_NAME: ${GITHUB_CHECK_RUN_NAME:-PR Reviewer}
+      REVIEW_WORKER_ENABLED: "true"
+      REVIEW_JOB_MAX_ATTEMPTS: ${REVIEW_JOB_MAX_ATTEMPTS:-5}
+      REVIEW_JOB_LEASE_SECONDS: ${REVIEW_JOB_LEASE_SECONDS:-180}
+      REVIEW_JOB_BACKOFF_SECONDS: ${REVIEW_JOB_BACKOFF_SECONDS:-5}
+      REVIEW_JOB_MAX_BACKOFF_SECONDS: ${REVIEW_JOB_MAX_BACKOFF_SECONDS:-300}
+      REVIEW_INTELLIGENCE_ENABLED: ${REVIEW_INTELLIGENCE_ENABLED:-true}
+      REVIEW_SANDBOX_MODE: filesystem
+      REVIEW_SANDBOX_ROOT: /sandbox
+      REVIEW_SANDBOX_REQUEST_TIMEOUT_SECONDS: ${REVIEW_SANDBOX_REQUEST_TIMEOUT_SECONDS:-900}
+      REVIEW_SANDBOX_COMMAND_TIMEOUT_SECONDS: ${REVIEW_SANDBOX_COMMAND_TIMEOUT_SECONDS:-300}
+      REVIEW_MAX_IMPACTED_FILES: ${REVIEW_MAX_IMPACTED_FILES:-40}
+    volumes:
+      - sandbox_data:/sandbox
+    command: ["python", "worker.py"]
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+
+  sandbox:
+    build: .
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    environment:
+      SANDBOX_ROOT: /sandbox
+      SANDBOX_NETWORK_DISABLED: "true"
+    volumes:
+      - sandbox_data:/sandbox
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    command: ["python", "sandbox_service.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; d=json.load(open('/sandbox/health.json')); assert time.time()-d['updated_at'] < 10"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - KILL
+    pids_limit: 300
 
 volumes:
   pgdata:
+  sandbox_data:

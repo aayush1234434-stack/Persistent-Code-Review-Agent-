@@ -96,9 +96,11 @@
       background: #fff;
       color: #334155;
     }
-    .badge.pending, .badge.awaiting_approval, .badge.queued { color: var(--warn); border-color: #f2d58a; }
-    .badge.completed { color: var(--accent); border-color: #99d8ce; }
-    .badge.failed { color: var(--danger); border-color: #efb4b4; }
+    .badge.pending, .badge.retrying, .badge.finalizing, .badge.awaiting_approval, .badge.queued { color: var(--warn); border-color: #f2d58a; }
+    .badge.completed, .badge.fixed, .badge.passed { color: var(--accent); border-color: #99d8ce; }
+    .badge.failed, .badge.new, .badge.critical, .badge.high { color: var(--danger); border-color: #efb4b4; }
+    .badge.recurring, .badge.medium { color: var(--warn); border-color: #f2d58a; }
+    .badge.dismissed, .badge.none, .badge.not_run { color: var(--muted); border-color: #cbd5e1; }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .section { border-top: 1px solid #e6ebf1; padding-top: 12px; margin-top: 12px; }
     .timeline { display: grid; gap: 8px; }
@@ -136,6 +138,8 @@
           <option value="">Any status</option>
           <option value="queued">Queued</option>
           <option value="pending">Pending</option>
+          <option value="retrying">Retrying</option>
+          <option value="finalizing">Finalizing</option>
           <option value="awaiting_approval">Awaiting approval</option>
           <option value="completed">Completed</option>
           <option value="failed">Failed</option>
@@ -153,11 +157,15 @@
         <table id="reviews-table">
           <thead>
             <tr>
-              <th>ID</th><th>Repo</th><th>PR</th><th>Author</th><th>Status</th><th>Decision</th><th>Findings</th><th>Updated</th>
+              <th>ID</th><th>Repo</th><th>PR</th><th>Version</th><th>Author</th><th>Status</th><th>Decision</th><th>Findings</th><th>Updated</th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
+      </div>
+      <div class="section">
+        <h2>Evaluation &amp; Trust</h2>
+        <div id="trust-metrics" class="muted small">Loading review telemetry…</div>
       </div>
     </section>
 
@@ -172,6 +180,7 @@
         <button id="request-btn" disabled>Request Changes</button>
         <button id="history-btn" disabled>Load History</button>
         <button id="rerun-btn" disabled>Rerun Analysis</button>
+        <button id="rerun-latest-btn" disabled>Review New Commits</button>
       </div>
       <div class="grid-2" style="margin-top: 8px;">
         <input id="checkpoint-input" type="text" placeholder="Checkpoint ID for rerun">
@@ -186,6 +195,17 @@
         <div id="timeline" class="timeline muted small">No review selected.</div>
       </div>
 
+      <div class="section grid-2">
+        <div>
+          <h2>Engineering Manager Summary</h2>
+          <div id="manager-summary" class="muted small">No summary loaded.</div>
+        </div>
+        <div>
+          <h2>File Risk Heatmap</h2>
+          <div id="risk-heatmap" class="muted small">No risk baseline loaded.</div>
+        </div>
+      </div>
+
       <div class="section">
         <h2>Findings</h2>
         <div class="table-wrap scroll">
@@ -197,6 +217,17 @@
             </thead>
             <tbody><tr><td colspan="7" class="muted">No review selected.</td></tr></tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="section grid-2">
+        <div>
+          <h2>Repository Intelligence</h2>
+          <div id="intelligence-view" class="muted small">No analysis loaded.</div>
+        </div>
+        <div>
+          <h2>Suggested Tests</h2>
+          <div id="test-suggestions" class="muted small">No suggestions loaded.</div>
         </div>
       </div>
 
@@ -278,6 +309,7 @@
       document.getElementById("request-btn").disabled = !awaiting;
       document.getElementById("history-btn").disabled = !hasSelection;
       document.getElementById("rerun-btn").disabled = !hasSelection || !document.getElementById("checkpoint-input").value.trim();
+      document.getElementById("rerun-latest-btn").disabled = !hasSelection;
       document.getElementById("checkpoint-select").disabled = !hasSelection || historyCache.length === 0;
     }
 
@@ -292,16 +324,17 @@
           <td>${row.id}</td>
           <td>${escapeHtml(row.repo)}</td>
           <td>${row.pr_number ?? ""}</td>
+          <td>v${row.review_version ?? "-"}</td>
           <td>${escapeHtml(row.author || "-")}</td>
           <td>${badge(row.status)}</td>
-          <td>${escapeHtml(row.decision || "-")}</td>
+          <td>${escapeHtml(row.decision || "-")}<div class="muted small">${escapeHtml(row.risk_direction || "")} ${row.risk_delta == null ? "" : escapeHtml(row.risk_delta)}</div></td>
           <td>${row.findings_count ?? 0}</td>
           <td class="small">${escapeHtml(shortDate(row.updated_at))}</td>
         `;
         tr.addEventListener("click", () => selectReview(row.id));
         tbody.appendChild(tr);
       });
-      if (!rows.length) tbody.innerHTML = `<tr><td colspan="8" class="muted">No reviews match the current filters.</td></tr>`;
+      if (!rows.length) tbody.innerHTML = `<tr><td colspan="9" class="muted">No reviews match the current filters.</td></tr>`;
     }
 
     async function selectReview(id) {
@@ -324,10 +357,18 @@
         ? `${review.repo} #${review.pr_number}: ${review.title || ""}`
         : "No Review Selected";
       document.getElementById("selected-meta").textContent = review
-        ? `${review.status} · ${review.author || "unknown author"} · ${review.findings.length} finding(s) · model ${review.current_state?.review_model_policy?.selected_model || "n/a"}`
+        ? `v${review.review_version} · ${review.status} · ${review.author || "unknown author"} · ${review.findings.length} finding(s) · model ${review.current_state?.review_model_policy?.selected_model || "n/a"}`
         : "Select a review row to inspect findings, history, and actions.";
       renderTimeline(review?.timeline || []);
+      renderManagerSummary(
+        review?.current_state?.manager_summary || {},
+        review?.current_state?.risk_baseline || {},
+        review?.current_state?.finding_lifecycle || {}
+      );
+      renderRiskHeatmap(review?.current_state?.file_risk_heatmap || []);
       renderFindings(review?.findings || []);
+      renderIntelligence(review?.current_state?.review_intelligence || {});
+      renderTestSuggestions(review?.current_state?.test_suggestions || []);
       renderComparison(review?.current_state?.rerun_comparison);
       setButtons();
     }
@@ -366,14 +407,14 @@
           <tr>
             <td>${index + 1}</td>
             <td>${escapeHtml(finding.effective_severity || finding.severity || "-")}<div class="muted small">conf ${escapeHtml(finding.confidence ?? "n/a")}</div></td>
-            <td>${escapeHtml(finding.finding_type || "-")}</td>
+            <td>${escapeHtml(finding.finding_type || "-")}<div>${badge(finding.lifecycle || "new")}</div></td>
             <td>${escapeHtml(finding.category || "-")}</td>
             <td class="mono">${escapeHtml(location)}</td>
-            <td>${escapeHtml(finding.description || "")}<div class="muted small">Evidence: ${escapeHtml(finding.evidence || "changed-line context")}</div>${context}</td>
+            <td>${escapeHtml(finding.description || "")}<div class="small"><strong>Why:</strong> ${escapeHtml(finding.why_this_matters || finding.impact || "")}</div><div class="muted small">Evidence: ${escapeHtml(finding.evidence || "changed-line context")}</div>${finding.suggested_patch ? `<div class="mono small">Suggested patch: ${escapeHtml(finding.suggested_patch)}</div>` : ""}${context}</td>
             <td>
               <div class="small muted">${escapeHtml(feedback)}</div>
               <button data-feedback="valid" data-index="${index}">Valid</button>
-              <button data-feedback="invalid" data-index="${index}">Invalid</button>
+              <button data-feedback="dismissed" data-index="${index}">Dismiss</button>
             </td>
           </tr>
         `;
@@ -381,6 +422,72 @@
       tbody.querySelectorAll("button[data-feedback]").forEach((button) => {
         button.addEventListener("click", () => markFeedback(button.dataset.index, button.dataset.feedback).catch(showError));
       });
+    }
+
+    function renderManagerSummary(summary, baseline, lifecycleData) {
+      const target = document.getElementById("manager-summary");
+      if (!summary?.headline) {
+        target.textContent = "No manager summary recorded.";
+        return;
+      }
+      const lifecycle = summary.lifecycle || {};
+      const fixed = lifecycleData.fixed || [];
+      target.innerHTML = `
+        <div><strong>${escapeHtml(summary.headline)}</strong></div>
+        <div>Decision: ${badge(summary.decision)}</div>
+        <div>Scope: ${summary.scope?.changed_files ?? 0} changed / ${summary.scope?.impacted_files ?? 0} impacted files</div>
+        <div>Lifecycle: ${lifecycle.new ?? 0} new · ${lifecycle.recurring ?? 0} recurring · ${lifecycle.fixed ?? 0} fixed · ${lifecycle.dismissed ?? 0} dismissed</div>
+        <div>Tests: ${badge(summary.tests?.status || "not_run")}</div>
+        <div class="muted">Current risk ${escapeHtml(baseline.current_score ?? 0)}; previous ${escapeHtml(baseline.previous_score ?? 0)}</div>
+        ${fixed.length ? `<div class="muted">Fixed: ${fixed.slice(0, 5).map((item) => escapeHtml(item.file)).join(", ")}</div>` : ""}
+      `;
+    }
+
+    function renderRiskHeatmap(files) {
+      const target = document.getElementById("risk-heatmap");
+      if (!files.length) {
+        target.textContent = "No files in the risk map.";
+        return;
+      }
+      const max = Math.max(...files.map((item) => Number(item.score) || 0), 1);
+      const colors = { critical: "#b91c1c", high: "#dc2626", medium: "#d97706", low: "#0284c7", none: "#94a3b8" };
+      target.innerHTML = files.slice(0, 15).map((item) => `
+        <div style="margin-bottom:8px">
+          <div><span class="mono">${escapeHtml(item.file)}</span> ${badge(item.level)} · ${escapeHtml(item.score)}</div>
+          <div style="height:6px;background:#e2e8f0;border-radius:4px"><div style="height:6px;width:${Math.max(2, (Number(item.score) || 0) / max * 100)}%;background:${colors[item.level] || colors.none};border-radius:4px"></div></div>
+        </div>
+      `).join("");
+    }
+
+    function renderIntelligence(intelligence) {
+      const target = document.getElementById("intelligence-view");
+      if (!intelligence?.status) {
+        target.textContent = "No repository intelligence recorded.";
+        return;
+      }
+      const scope = intelligence.review_scope || {};
+      const commands = intelligence.execution?.commands || [];
+      target.innerHTML = `
+        <div>${badge(intelligence.status)}</div>
+        <div>Impacted files: <strong>${scope.impacted_files?.length ?? 0}</strong></div>
+        <div>Callers: <strong>${scope.callers?.length ?? 0}</strong></div>
+        <div>Sandbox: <span class="mono">${escapeHtml(intelligence.isolation?.backend || "unknown")}</span></div>
+        ${commands.map((command) => `<div class="mono">${escapeHtml(command.name)} → ${escapeHtml(command.exit_code)}</div>`).join("")}
+      `;
+    }
+
+    function renderTestSuggestions(suggestions) {
+      const target = document.getElementById("test-suggestions");
+      if (!suggestions.length) {
+        target.textContent = "No generated test suggestions.";
+        return;
+      }
+      target.innerHTML = suggestions.slice(0, 10).map((item) => `
+        <div class="timeline-item">
+          <div>🧪</div>
+          <div><strong>${escapeHtml(item.title)}</strong><div class="mono">${escapeHtml(item.file)}</div><div>${escapeHtml(item.reason)}</div></div>
+        </div>
+      `).join("");
     }
 
     function renderHistory(history) {
@@ -469,6 +576,22 @@
       `;
     }
 
+    async function loadTrustMetrics() {
+      const metrics = await fetchJson("/evaluation/metrics");
+      const time = metrics.time_to_review_ms || {};
+      const cost = metrics.cost_per_pr_usd || {};
+      const acceptance = metrics.human_acceptance_rate;
+      document.getElementById("trust-metrics").innerHTML = `
+        <div class="summary-grid">
+          <div class="metric"><strong>${metrics.review_count ?? 0}</strong><span>Measured reviews</span></div>
+          <div class="metric"><strong>${time.p50 == null ? "n/a" : `${Math.round(time.p50)} ms`}</strong><span>P50 review time</span></div>
+          <div class="metric"><strong>${cost.mean == null ? "n/a" : `$${Number(cost.mean).toFixed(4)}`}</strong><span>Mean cost / PR</span></div>
+          <div class="metric"><strong>${acceptance == null ? "n/a" : `${Math.round(acceptance * 100)}%`}</strong><span>Human acceptance</span></div>
+        </div>
+        <div class="muted" style="margin-top:8px">Precision, recall, false-positive rate, and confidence calibration are reported by the versioned 120-PR benchmark.</div>
+      `;
+    }
+
     function renderCounts(items) {
       if (!items?.length) return `<div class="muted">No data</div>`;
       return items.slice(0, 10).map((item) => `
@@ -528,6 +651,17 @@
       await loadReviews();
     }
 
+    async function rerunLatest() {
+      if (!selectedId) return;
+      const result = await fetchJson(`/reviews/${selectedId}/rerun-latest`, { method: "POST" });
+      if (result.review_id) {
+        await selectReview(result.review_id);
+        return;
+      }
+      document.getElementById("selected-meta").textContent = `Queued review for ${result.source_sha}`;
+      await loadReviews();
+    }
+
     async function markFeedback(index, verdict) {
       const note = document.getElementById("reason-input").value.trim();
       await fetchJson(`/reviews/${selectedId}/findings/${index}/feedback`, {
@@ -547,7 +681,7 @@
       document.getElementById(id).addEventListener("input", () => loadReviews().catch(showError));
       document.getElementById(id).addEventListener("change", () => loadReviews().catch(showError));
     });
-    document.getElementById("refresh-btn").addEventListener("click", () => loadReviews().catch(showError));
+    document.getElementById("refresh-btn").addEventListener("click", () => Promise.all([loadReviews(), loadTrustMetrics()]).catch(showError));
     document.getElementById("memory-btn").addEventListener("click", () => loadMemory().catch(showError));
     document.getElementById("post-final-btn").addEventListener("click", () => postFinalReview().catch(showError));
     document.getElementById("approve-btn").addEventListener("click", () => approve().catch(showError));
@@ -555,6 +689,7 @@
     document.getElementById("request-btn").addEventListener("click", () => requestChanges().catch(showError));
     document.getElementById("history-btn").addEventListener("click", () => loadHistory(true).catch(showError));
     document.getElementById("rerun-btn").addEventListener("click", () => rerunFromCheckpoint().catch(showError));
+    document.getElementById("rerun-latest-btn").addEventListener("click", () => rerunLatest().catch(showError));
     document.getElementById("checkpoint-select").addEventListener("change", (event) => {
       document.getElementById("checkpoint-input").value = event.target.value || "";
       setButtons();
@@ -563,6 +698,7 @@
 
     setButtons();
     loadReviews().catch(showError);
+    loadTrustMetrics().catch(showError);
   </script>
 </body>
 </html>

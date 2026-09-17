@@ -1,0 +1,55 @@
+name: Live 120-PR Evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      review_model:
+        description: Review model (must match or intentionally replace the accepted contract)
+        required: false
+        default: gpt-4o-mini
+      strong_model:
+        description: Strong model
+        required: false
+        default: gpt-4o
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_REVIEW_MODEL: ${{ inputs.review_model }}
+      OPENAI_TRIAGE_MODEL: gpt-4o-mini
+      OPENAI_STRONG_REVIEW_MODEL: ${{ inputs.strong_model }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run all real-world PR cases
+        run: >-
+          python benchmarks/run_live_benchmark.py
+          --output benchmark-results/predictions.jsonl
+
+      - name: Score and enforce regression thresholds
+        run: >-
+          python benchmarks/evaluate.py
+          --predictions benchmark-results/predictions.jsonl
+          --contract benchmarks/baselines/evaluation_contract.v1.json
+          --output-json benchmark-results/report.json
+          --output-markdown benchmark-results/report.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr-review-evaluation
+          path: benchmark-results/
+          retention-days: 90
