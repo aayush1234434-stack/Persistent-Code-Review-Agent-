@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Persistent Code Review Agent V2 — Demo</title>
+  <style>
+    :root{--bg:#07111f;--panel:#0e1d30;--panel2:#10283a;--line:#253d56;--text:#eff7ff;--muted:#91a9bd;--mint:#2dd4bf;--blue:#38bdf8;--red:#fb7185;--amber:#fbbf24}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 82% 0,#163b55 0,transparent 31%),var(--bg);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,sans-serif}
+    a{color:var(--blue)}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 34px;background:#081524dd;backdrop-filter:blur(12px);position:sticky;top:0;z-index:2}
+    .brand{display:flex;gap:12px;align-items:center;font-size:17px;font-weight:750}.logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--mint),var(--blue));display:grid;place-items:center;color:#05212a;font-weight:900}
+    .live{border:1px solid #1f766d;color:#72f1df;border-radius:999px;padding:6px 10px;font-size:12px}.layout{display:grid;grid-template-columns:245px 1fr;min-height:calc(100vh - 70px)}
+    aside{border-right:1px solid var(--line);padding:24px 16px}.nav{padding:11px 13px;border-radius:9px;color:var(--muted);margin-bottom:6px}.nav.active{background:#15364a;color:#dffffa}.main{padding:28px 32px;max-width:1500px;width:100%;margin:auto}
+    .eyebrow{color:#62e8d5;font-size:11px;font-weight:800;letter-spacing:1.5px}.top{display:flex;justify-content:space-between;gap:20px;align-items:end}.top h1{font-size:30px;margin:8px 0 4px}.muted{color:var(--muted)}
+    button{background:linear-gradient(135deg,#1ab8a4,#188bc1);color:white;border:0;border-radius:9px;padding:10px 14px;font-weight:700}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:24px 0}.card{background:linear-gradient(145deg,#102337,#0c1929);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 12px 30px #0003}.metric strong{font-size:26px;display:block;margin:7px 0}.delta{font-size:12px;color:#69dfca}
+    .content{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}.title{font-size:15px;font-weight:750;margin-bottom:14px}.pr{display:grid;grid-template-columns:1fr auto;gap:14px;padding:15px 0;border-top:1px solid #21364c}.pr:first-of-type{border-top:0}.repo{font-weight:700}.meta{font-size:12px;color:var(--muted);margin-top:6px}.badge{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid #31506c;color:#aac1d3;font-size:11px}.badge.red{border-color:#793849;color:#ff9caf}.badge.green{border-color:#217266;color:#65e8d2}.badge.amber{border-color:#6d5822;color:#ffd86b}
+    .finding{border-left:3px solid var(--red);padding:4px 0 4px 14px;margin:16px 0}.finding h3{font-size:14px;margin:0 0 7px}.code{background:#071421;border:1px solid #20384e;padding:12px;border-radius:9px;color:#b9d5e8;font:12px ui-monospace,monospace;white-space:pre-wrap}.why{background:#112b34;border-radius:9px;padding:11px;margin-top:10px;color:#bdece5}.bars{display:grid;gap:11px}.barline{display:grid;grid-template-columns:90px 1fr 38px;gap:10px;align-items:center}.bar{height:8px;background:#1b3146;border-radius:9px;overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--mint),var(--blue));border-radius:9px}
+    .notice{margin-top:18px;padding:12px 14px;border:1px solid #665521;background:#2d2814;color:#ffe48f;border-radius:10px;font-size:12px}.arch{margin-top:18px;width:100%;border-radius:14px;border:1px solid var(--line)}
+    @media(max-width:900px){.layout{grid-template-columns:1fr}aside{display:none}.metrics{grid-template-columns:1fr 1fr}.content{grid-template-columns:1fr}.main{padding:22px 16px}}
+  </style>
+</head>
+<body>
+<header><div class="brand"><span class="logo">PR</span>Persistent Review <span class="badge">V2</span></div><div class="live">● INTERACTIVE PRODUCT PREVIEW</div></header>
+<div class="layout">
+  <aside><div class="nav active">Review control center</div><div class="nav">Evaluation &amp; trust</div><div class="nav">Repository memory</div><div class="nav">Worker health</div><div class="nav">Configuration</div></aside>
+  <main class="main">
+    <div class="top"><div><div class="eyebrow">ENGINEERING CONTROL CENTER</div><h1>Review quality you can inspect</h1><div class="muted">Evidence-backed findings, durable execution, and measurable developer trust.</div></div><button>Review new commits</button></div>
+    <div class="metrics">
+      <div class="card metric"><span class="muted">Review status</span><strong>Awaiting approval</strong><span class="delta">Version 4 · head 8f42c9a</span></div>
+      <div class="card metric"><span class="muted">Risk movement</span><strong>−18%</strong><span class="delta">Improved from previous commit</span></div>
+      <div class="card metric"><span class="muted">Grounded findings</span><strong>3 / 4</strong><span class="delta">1 unsupported candidate removed</span></div>
+      <div class="card metric"><span class="muted">Analysis time</span><strong>42.8s</strong><span class="delta">Estimated cost $0.038</span></div>
+    </div>
+    <div class="content">
+      <section class="card"><div class="title">Selected review · acme/payments #418</div><div class="meta">feat: make refund processing idempotent · opened by maya · 7 files changed</div>
+        <div class="finding"><span class="badge red">HIGH · SECURITY</span><h3>Idempotency key is trusted before tenant ownership is verified</h3><div class="meta">payments/refunds.py:87 · confidence 0.94 · lifecycle NEW</div></div>
+        <div class="code">existing = Refund.objects.get(idempotency_key=request.key)
+return existing.to_response()</div>
+        <div class="why"><strong>Why this matters</strong><br>Another tenant that learns a valid key could retrieve refund state across the authorization boundary. The changed line is executed before the tenant filter.</div>
+        <div class="code" style="margin-top:10px;color:#7ce9d7">Suggested patch
+existing = Refund.objects.get(
+    tenant=request.tenant,
+    idempotency_key=request.key,
+)</div>
+      </section>
+      <div>
+        <section class="card"><div class="title">File risk heatmap</div><div class="bars">
+          <div class="barline"><span>refunds.py</span><div class="bar"><i style="width:92%"></i></div><b>9.2</b></div>
+          <div class="barline"><span>models.py</span><div class="bar"><i style="width:58%"></i></div><b>5.8</b></div>
+          <div class="barline"><span>api.ts</span><div class="bar"><i style="width:34%"></i></div><b>3.4</b></div>
+          <div class="barline"><span>tests.py</span><div class="bar"><i style="width:18%"></i></div><b>1.8</b></div>
+        </div></section>
+        <section class="card" style="margin-top:16px"><div class="title">Execution evidence</div>
+          <div class="pr"><div><div class="repo">Targeted tests</div><div class="meta">38 passed · 1 failed</div></div><span class="badge red">FAILED</span></div>
+          <div class="pr"><div><div class="repo">Ruff + Bandit</div><div class="meta">Changed and impacted files</div></div><span class="badge green">PASSED</span></div>
+          <div class="pr"><div><div class="repo">Semgrep</div><div class="meta">Offline repository rules</div></div><span class="badge green">PASSED</span></div>
+          <div class="pr"><div><div class="repo">Sandbox</div><div class="meta">Unique UID · no network · bounded</div></div><span class="badge green">ISOLATED</span></div>
+        </section>
+        <div class="notice">Demo values are illustrative. Measured benchmark results will appear in the <a href="benchmark-report.html">published evaluation report</a> after an authenticated 120-case run.</div>
+      </div>
+    </div>
+    <img class="arch" src="architecture.svg" alt="Persistent Code Review Agent architecture">
+  </main>
+</div>
+</body></html>

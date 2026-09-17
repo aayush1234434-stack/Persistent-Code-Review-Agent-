@@ -242,6 +242,11 @@ def evaluate_cases(cases: list[dict[str, Any]], runs: list[dict[str, Any]]) -> d
     feedback_valid = 0
     feedback_invalid = 0
     evaluated = 0
+    valid_unlabeled = 0
+    confirmed_false_positives = 0
+    uncertain_unmatched = 0
+    unadjudicated_unmatched = 0
+    adjudicated_confidence_samples: list[tuple[float, int]] = []
 
     for case in cases:
         case_id = str(case["id"])
@@ -253,21 +258,64 @@ def evaluate_cases(cases: list[dict[str, Any]], runs: list[dict[str, Any]]) -> d
         findings = [dict(item) for item in run.get("findings", [])]
         matches, unmatched_labels, unmatched_predictions = match_case_findings(labels, findings)
         matched_prediction_indexes = {prediction_index for _label_index, prediction_index in matches}
+        recovered_matches: list[tuple[int, int]] = []
+        remaining_label_indexes = set(unmatched_labels)
+        remaining_prediction_indexes = set(unmatched_predictions)
+        adjudications: dict[int, dict[str, Any]] = {}
+        for prediction_index in unmatched_predictions:
+            adjudication = findings[prediction_index].get("benchmark_adjudication") or {}
+            adjudications[prediction_index] = adjudication
+            if adjudication.get("verdict") != "matches_label":
+                continue
+            matched_label_id = str(adjudication.get("matched_label_id") or "")
+            label_index = next(
+                (
+                    candidate
+                    for candidate in remaining_label_indexes
+                    if str(labels[candidate].get("id") or "") == matched_label_id
+                ),
+                None,
+            )
+            if label_index is not None:
+                recovered_matches.append((label_index, prediction_index))
+                remaining_label_indexes.remove(label_index)
+                remaining_prediction_indexes.remove(prediction_index)
+                matched_prediction_indexes.add(prediction_index)
 
         for label_index, prediction_index in matches:
             category = _normalized_category(labels[label_index].get("category"))
             category_counts[category]["tp"] += 1
             global_counts["tp"] += 1
             confidence_samples.append((float(findings[prediction_index].get("confidence", 0.5)), 1))
-        for label_index in unmatched_labels:
+            adjudicated_confidence_samples.append((float(findings[prediction_index].get("confidence", 0.5)), 1))
+        for label_index, prediction_index in recovered_matches:
+            category = _normalized_category(labels[label_index].get("category"))
+            category_counts[category]["tp"] += 1
+            global_counts["tp"] += 1
+            confidence_samples.append((float(findings[prediction_index].get("confidence", 0.5)), 1))
+            adjudicated_confidence_samples.append((float(findings[prediction_index].get("confidence", 0.5)), 1))
+        for label_index in sorted(remaining_label_indexes):
             category = _normalized_category(labels[label_index].get("category"))
             category_counts[category]["fn"] += 1
             global_counts["fn"] += 1
-        for prediction_index in unmatched_predictions:
+        for prediction_index in sorted(remaining_prediction_indexes):
             category = _normalized_category(findings[prediction_index].get("category"))
             category_counts[category]["fp"] += 1
             global_counts["fp"] += 1
             confidence_samples.append((float(findings[prediction_index].get("confidence", 0.5)), 0))
+            adjudication = adjudications.get(prediction_index, {})
+            verdict = str(adjudication.get("verdict") or findings[prediction_index].get("benchmark_verdict") or "")
+            confidence = float(findings[prediction_index].get("confidence", 0.5))
+            if verdict == "valid_extra":
+                valid_unlabeled += 1
+                adjudicated_confidence_samples.append((confidence, 1))
+            elif verdict == "false_positive":
+                confirmed_false_positives += 1
+                adjudicated_confidence_samples.append((confidence, 0))
+            elif verdict == "uncertain":
+                uncertain_unmatched += 1
+            else:
+                unadjudicated_unmatched += 1
 
         if not labels:
             clean_cases += 1
@@ -289,6 +337,14 @@ def evaluate_cases(cases: list[dict[str, Any]], runs: list[dict[str, Any]]) -> d
 
     feedback_total = feedback_valid + feedback_invalid
     metrics = _metric_bucket(**global_counts)
+    adjudicated_denominator = global_counts["tp"] + valid_unlabeled + confirmed_false_positives
+    adjudicated_precision = (
+        (global_counts["tp"] + valid_unlabeled) / adjudicated_denominator
+        if adjudicated_denominator else None
+    )
+    unmatched_total = (
+        valid_unlabeled + confirmed_false_positives + uncertain_unmatched + unadjudicated_unmatched
+    )
     metrics.update({
         "case_count": len(cases),
         "evaluated_case_count": evaluated,
@@ -299,6 +355,22 @@ def evaluate_cases(cases: list[dict[str, Any]], runs: list[dict[str, Any]]) -> d
         "time_to_review_ms": distribution(durations),
         "cost_per_pr_usd": distribution(costs),
         "calibration": calibration_curve(confidence_samples),
+        "sparse_label_adjudication": {
+            "valid_unlabeled": valid_unlabeled,
+            "confirmed_false_positives": confirmed_false_positives,
+            "uncertain": uncertain_unmatched,
+            "unadjudicated": unadjudicated_unmatched,
+            "coverage": round(
+                (valid_unlabeled + confirmed_false_positives + uncertain_unmatched) / unmatched_total,
+                6,
+            ) if unmatched_total else 1.0,
+            "precision": round(adjudicated_precision, 6) if adjudicated_precision is not None else None,
+            "false_positive_rate": round(
+                confirmed_false_positives / adjudicated_denominator,
+                6,
+            ) if adjudicated_denominator else None,
+            "calibration": calibration_curve(adjudicated_confidence_samples),
+        },
         "by_category": {
             category: _metric_bucket(**counts)
             for category, counts in sorted(category_counts.items())
@@ -379,6 +451,14 @@ def compare_to_baseline(report: dict[str, Any], baseline: dict[str, Any]) -> lis
     actual_ece = (report.get("calibration") or {}).get("expected_calibration_error")
     if max_ece is not None and (actual_ece is None or float(actual_ece) > float(max_ece)):
         failures.append(f"expected_calibration_error {actual_ece!r} exceeds {max_ece}")
+    max_adjudicated_fpr = thresholds.get("max_adjudicated_false_positive_rate")
+    actual_adjudicated_fpr = (report.get("sparse_label_adjudication") or {}).get("false_positive_rate")
+    if max_adjudicated_fpr is not None and (
+        actual_adjudicated_fpr is None or float(actual_adjudicated_fpr) > float(max_adjudicated_fpr)
+    ):
+        failures.append(
+            f"adjudicated false_positive_rate {actual_adjudicated_fpr!r} exceeds {max_adjudicated_fpr}"
+        )
     minimum_coverage = float(thresholds.get("min_coverage", 1.0))
     if float(report.get("coverage", 0.0)) < minimum_coverage:
         failures.append(f"coverage {report.get('coverage')} is below minimum {minimum_coverage}")

@@ -68,6 +68,58 @@ def test_symbol_map_limits_review_to_changed_files_and_callers(tmp_path):
     assert "tests/test_service.py" in command_by_name["tests"]["argv"]
 
 
+def test_multilanguage_symbol_and_caller_maps(tmp_path):
+    fixtures = {
+        "typescript": {
+            "changed": "ts/service.ts",
+            "caller": "ts/consumer.ts",
+            "changed_text": "export function calculate(value: number) { return value * 2; }\n",
+            "caller_text": "import { calculate } from './service';\nexport const result = calculate(2);\n",
+            "symbol": "calculate",
+        },
+        "go": {
+            "changed": "go/pkg/service.go",
+            "caller": "go/cmd/main.go",
+            "changed_text": "package pkg\nfunc Calculate(value int) int { return value * 2 }\n",
+            "caller_text": "package main\nimport \"example/go/pkg\"\nfunc main() { pkg.Calculate(2) }\n",
+            "symbol": "Calculate",
+        },
+        "java": {
+            "changed": "java/com/example/Service.java",
+            "caller": "java/com/example/Consumer.java",
+            "changed_text": "package com.example;\npublic class Service {\n public int calculate(int value) { return value * 2; }\n}\n",
+            "caller_text": "package com.example;\nimport com.example.Service;\nclass Consumer { int run() { return new Service().calculate(2); } }\n",
+            "symbol": "calculate",
+        },
+        "rust": {
+            "changed": "rust/src/service.rs",
+            "caller": "rust/src/main.rs",
+            "changed_text": "pub fn calculate(value: i32) -> i32 { value * 2 }\n",
+            "caller_text": "use crate::service::calculate;\nfn main() { calculate(2); }\n",
+            "symbol": "calculate",
+        },
+    }
+    for language, fixture in fixtures.items():
+        changed_path = tmp_path / fixture["changed"]
+        caller_path = tmp_path / fixture["caller"]
+        changed_path.parent.mkdir(parents=True, exist_ok=True)
+        caller_path.parent.mkdir(parents=True, exist_ok=True)
+        changed_path.write_text(fixture["changed_text"])
+        caller_path.write_text(fixture["caller_text"])
+
+        symbol_map = build_symbol_dependency_map(
+            tmp_path,
+            [fixture["changed"]],
+            max_impacted_files=20,
+        )
+
+        assert symbol_map["files"][fixture["changed"]]["language"] == language
+        assert any(
+            symbol["name"] == fixture["symbol"]
+            for symbol in symbol_map["changed_symbols"]
+        )
+        assert fixture["caller"] in symbol_map["impacted_files"]
+
 def test_static_tool_outputs_are_normalized():
     results = [
         {
