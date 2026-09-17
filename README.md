@@ -1,117 +1,249 @@
-# Persistent Code Review Agent
+<div align="center">
 
-An automated code review agent that analyzes pull requests, detects issues, and generates structured review feedback with severity ranking.
+# Persistent Code Review Agent V2
 
----
+### Evidence-backed pull-request reviews that survive failures, understand impact, and improve with feedback.
 
-## Problem
+[![CI](https://github.com/aayush1234434-stack/Persistent-Code-Review-Agent-/actions/workflows/ci.yml/badge.svg)](https://github.com/aayush1234434-stack/Persistent-Code-Review-Agent-/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Durable%20State-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Isolated%20Analysis-2496ED?logo=docker&logoColor=white)
 
-Code reviews are:
+[Product preview](https://aayush1234434-stack.github.io/Persistent-Code-Review-Agent-/) ·
+[Architecture](docs/architecture.svg) ·
+[Evaluation report](https://aayush1234434-stack.github.io/Persistent-Code-Review-Agent-/benchmark-report.html) ·
+[Quick start](#quick-start)
 
-- Time-consuming
-- Inconsistent across reviewers
-- Prone to missing critical issues, such as security flaws and bad practices
-
----
-
-## Solution
-
-This project implements a **persistent code review agent** that:
-
-- Parses pull request diffs
-- Analyzes code for issues
-- Assigns severity levels
-- Generates structured review comments
+</div>
 
 ---
 
-## How It Works
+Persistent Code Review Agent is a production-oriented AI review platform for GitHub pull requests. It combines LLM reasoning with deterministic checks, repository-aware impact analysis, isolated execution, human approval, and measurable quality gates.
 
-Pipeline:
+It is built around a simple principle: **a finding should not be published merely because a model generated it.** It should be grounded in the diff, supported by static or execution evidence when possible, and remain auditable across review versions.
+
+> [!IMPORTANT]
+> The 120-case real-world evaluation harness is implemented and reproducible. The checked-in baseline currently validates the corpus, prompts, models, and scoring contract; measured model-quality results remain intentionally unpublished until the complete authenticated run is accepted.
+
+## Why this is different
+
+| | Capability | What it means in practice |
+|---|---|---|
+| 🧱 | **Durable by design** | PostgreSQL jobs, renewable leases, idempotent webhooks, bounded retries, and restart recovery. |
+| 🧠 | **Repository-aware** | Reviews changed files, symbols, imports, reverse dependencies, and callers instead of treating a diff as isolated text. |
+| 🔬 | **Evidence first** | Combines Ruff, Bandit, Semgrep, targeted tests, deterministic checks, and changed-line grounding. |
+| 🔐 | **Isolated execution** | Runs repository commands with no network, a unique unprivileged UID, resource limits, and no application secrets. |
+| 💬 | **Developer friendly** | Produces inline GitHub comments, suggested patches, “why this matters,” lifecycle state, and one-click reruns. |
+| 📊 | **Measurable trust** | Tracks precision, recall, false positives, calibration, latency, cost, and human acceptance. |
+
+## Architecture
+
+![Persistent Code Review Agent V2 architecture](docs/architecture.svg)
 
 ```text
-PR webhook -> durable queue -> isolated checkout
-  -> symbol/dependency map -> impacted-file scope
-  -> Ruff + Bandit + Semgrep + tests
-  -> LLM + deterministic review -> evidence verifier
-  -> human approval -> GitHub review
+GitHub webhook
+    │
+    ▼
+Idempotent ingestion ──► PostgreSQL durable queue ──► leased worker
+                                                        │
+                                                        ▼
+                                             isolated PR checkout
+                                                        │
+                             ┌──────────────────────────┼──────────────────────────┐
+                             ▼                          ▼                          ▼
+                    symbol/dependency map       static analysis              targeted tests
+                             └──────────────────────────┼──────────────────────────┘
+                                                        ▼
+                                            LLM + deterministic review
+                                                        │
+                                                        ▼
+                                              evidence/grounding gate
+                                                        │
+                                                        ▼
+                                            human approval + GitHub review
 ```
 
----
+## Core capabilities
 
-## Features
+### Reliable platform
 
-- Detects common issues such as security problems, bad practices, and policy violations
-- Severity classification: HIGH / MEDIUM / LOW
-- Benchmark test cases included
-- Docker support
-- GitHub Actions CI (pytest + benchmarks)
-- Durable PostgreSQL job queue with worker leases and crash recovery
-- Idempotent GitHub webhook ingestion
-- Monotonic review versions for every PR commit
-- Exponential retry/backoff with terminal failure state
-- Transaction-safe human decisions and finding feedback
-- Per-PR detached checkout in a network-isolated analysis container
-- Python symbol, import, reverse-dependency, and caller mapping
-- Cross-language repository intelligence for Python, JavaScript/TypeScript, Go, Java, and Rust
-- Impacted-file linting and SAST with Ruff, Bandit, and offline Semgrep rules
-- Targeted pytest execution with bounded resources and timeouts
-- Finding corroboration from changed lines, static evidence, and execution output
+- Durable PostgreSQL queue using `FOR UPDATE SKIP LOCKED`
+- Renewable worker leases with recovery after process or database restarts
+- Idempotent webhook handling using GitHub delivery IDs or signed-payload hashes
+- Monotonic review versions keyed by repository, PR number, and source SHA
+- Exponential retry/backoff with explicit terminal failure state
+- Transactional approvals, review decisions, and finding feedback
+- Fail-fast production startup when persistence or isolation is unavailable
+
+### Review intelligence
+
+- Isolated checkout of the exact PR head SHA
+- Changed-symbol, import, reverse-dependency, and caller analysis
+- Impact-scoped Ruff, Bandit, offline Semgrep, and test execution
+- Static findings restricted to changed files and verified against changed lines
+- Execution output attached as corroborating evidence
 - Structured regression-test suggestions for changed symbols and findings
-- Inline GitHub review comments with safe suggested-patch blocks
-- Developer-focused “why this matters” explanations
-- One-click review of the latest PR commit from the dashboard
-- Cross-version finding lifecycle: new, recurring, fixed, and dismissed
-- Engineering-manager summaries with test status and priority risks
-- File-level risk heatmaps and quantitative risk-baseline comparisons
-- Versioned 120-case real-world PR evaluation corpus with auditable source URLs
-- Precision, recall, F1, and false-positive rates globally and by issue category
-- Review latency, estimated cost per PR, and human finding-acceptance telemetry
+- Language-aware repository maps for Python, JavaScript/TypeScript, Go, Java, and Rust
+
+| Language | Symbols | Imports/dependencies | Caller discovery |
+|---|:---:|:---:|:---:|
+| Python | ✅ | ✅ | ✅ |
+| JavaScript / TypeScript | ✅ | ✅ | ✅ |
+| Go | ✅ | ✅ | ✅ |
+| Java | ✅ | ✅ | ✅ |
+| Rust | ✅ | ✅ | ✅ |
+
+### Developer experience
+
+- Inline GitHub comments with native suggested-patch blocks
+- Concise “why this matters” explanations
+- One-click review of the latest commit
+- Finding lifecycle: **new**, **recurring**, **fixed**, and **dismissed**
+- File-level risk heatmaps and previous-version risk comparisons
+- Engineering-manager summaries covering scope, tests, and priority risks
+- Persistent reviewer feedback that influences later review versions
+
+### Evaluation and trust
+
+- Versioned corpus of 120 human-reviewed public pull requests
+- Precision, recall, F1, and false-positive rate by issue category
+- Strict sparse-label scores plus independent adjudication of unmatched findings
 - Confidence calibration curves, Brier score, and expected calibration error
-- Prompt/model fingerprints that force an explicit benchmark-baseline update in CI
-- Extensible architecture
+- Time-to-review, estimated cost per PR, and human acceptance telemetry
+- Prompt, schema, model-policy, pricing, and corpus fingerprints
+- Regression gates for every prompt or default-model policy change
 
----
+## Example review
 
-## Example
-
-### Input: PR diff
+Given this change:
 
 ```diff
-+ password = "123456"
++ existing = Refund.objects.get(idempotency_key=request.key)
++ return existing.to_response()
 ```
 
-### Output
+The review can produce:
 
 ```text
-HIGH: Hardcoded secret detected
-Storing credentials directly in code is insecure.
+HIGH · SECURITY · confidence 0.94
+
+Idempotency key lookup crosses the tenant authorization boundary.
+
+Why this matters:
+Another tenant that learns a valid key could retrieve refund state before
+ownership is verified.
+
+Evidence:
+- Exact changed line
+- Repository caller context
+- Static-analysis result
+
+Suggested patch:
+existing = Refund.objects.get(
+    tenant=request.tenant,
+    idempotency_key=request.key,
+)
 ```
 
----
+## Quick start
 
-## Benchmarks
+### Requirements
 
-| Case | Issues Detected |
-| --- | --- |
-| Hardcoded Secret | Yes |
-| Repo Policy Violation | Yes |
-| Clean Refactor | No issues |
+- Python 3.11+
+- Docker with Compose
+- A PostgreSQL database for non-Docker local development
+- GitHub and OpenAI credentials for live reviews
 
-Run benchmarks:
+### Run the complete stack with Docker
+
+```bash
+git clone https://github.com/aayush1234434-stack/Persistent-Code-Review-Agent-.git
+cd Persistent-Code-Review-Agent-
+cp .env.example .env
+```
+
+Fill in the required values in `.env`, then start the stack:
+
+```bash
+docker compose up --build
+```
+
+| Surface | URL |
+|---|---|
+| Review dashboard | `http://localhost:8000/dashboard` |
+| Health check | `http://localhost:8000/healthz` |
+| Readiness check | `http://localhost:8000/readyz` |
+| Prometheus metrics | `http://localhost:8000/metrics` |
+| GitHub webhook | `POST http://localhost:8000/github/webhook` |
+
+### Run locally
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-analysis.txt
+cp .env.example .env
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+The API applies database migrations during startup. To run the web service and worker separately, set `REVIEW_WORKER_ENABLED=false` for the API and launch:
+
+```bash
+python worker.py
+```
+
+> [!NOTE]
+> Local mode does not execute repository tests unless `REVIEW_ALLOW_LOCAL_TEST_EXECUTION=true`. Production requires `REVIEW_SANDBOX_MODE=filesystem`; Docker Compose configures the isolated mode automatically.
+
+<details>
+<summary><strong>Important configuration</strong></summary>
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ENVIRONMENT` | Enables development or production startup policy | `development` |
+| `DATABASE_URL` | PostgreSQL persistence and durable queue | — |
+| `GITHUB_WEBHOOK_SECRET` | Validates webhook signatures | — |
+| `GITHUB_TOKEN` | Fetches PR metadata and publishes reviews | — |
+| `OPENAI_API_KEY` | Enables live LLM review nodes | — |
+| `DASHBOARD_API_KEY` | Protects review actions | — |
+| `REVIEW_WORKER_ENABLED` | Runs the embedded worker | `true` |
+| `REVIEW_SANDBOX_MODE` | `local` or isolated `filesystem` execution | `local` |
+| `REVIEW_JOB_MAX_ATTEMPTS` | Maximum queue attempts before terminal failure | `5` |
+| `REVIEW_RETAIN_SANDBOX` | Retains isolated workspaces for debugging | `false` |
+
+See [.env.example](.env.example) for the complete configuration surface.
+
+</details>
+
+## Review lifecycle
+
+1. GitHub sends a signed pull-request webhook.
+2. The API stores the delivery and review job transactionally.
+3. A worker claims the job with a renewable lease.
+4. The PR head is fetched into a unique workspace.
+5. Repository intelligence selects changed and impacted code.
+6. Static tools and targeted tests run inside the no-network sandbox.
+7. LLM and deterministic findings pass through an evidence gate.
+8. A reviewer approves, rejects, requests changes, or dismisses findings.
+9. Approved findings are published as inline GitHub review comments.
+10. New commits create a new version while preserving finding history.
+
+## Testing
+
+Run the unit and API suite:
+
+```bash
+pytest -q
+```
+
+Run the fast deterministic benchmark:
 
 ```bash
 python benchmarks/pr_review_benchmark.py
 ```
 
-The fast benchmark above exercises deterministic checks and pipeline behavior.
-Phase 4 adds a separate trust evaluation over 120 unique, human-reviewed public
-GitHub PRs. The corpus is pinned and checked in at
-`benchmarks/corpus/real_world_prs.v1.jsonl`; every case includes its source PR
-URL and upstream dataset revision.
-
-Validate corpus provenance and the accepted prompt/model contract without an
-LLM call:
+Validate the 120-case corpus and evaluation contract without an LLM call:
 
 ```bash
 python benchmarks/evaluate.py \
@@ -119,8 +251,21 @@ python benchmarks/evaluate.py \
   --contract benchmarks/baselines/evaluation_contract.v1.json
 ```
 
-Run the live agent over all cases, then calculate the quality, calibration,
-latency, cost, and acceptance report:
+Run the real PostgreSQL restart and isolated-sandbox integration checks:
+
+```bash
+docker compose up --build -d db sandbox
+python scripts/test_postgres_restart_recovery.py
+docker compose run --rm worker python scripts/test_sandbox_roundtrip.py
+docker compose down --volumes --remove-orphans
+```
+
+These integration checks are also enforced by the `docker-recovery` CI job.
+
+<details>
+<summary><strong>Run the complete live 120-case evaluation</strong></summary>
+
+This run uses paid model API calls and requires a configured `OPENAI_API_KEY`.
 
 ```bash
 python benchmarks/run_live_benchmark.py \
@@ -138,208 +283,66 @@ python benchmarks/evaluate.py \
   --output-html docs/benchmark-report.html
 ```
 
-The checked-in baseline is deliberately marked `contract_only` until the first
-full live run is accepted; it does not pretend that bootstrap or oracle
-predictions are model results. The manual **Live 120-PR Evaluation** workflow
-runs the complete suite, independently adjudicates unmatched findings, publishes
-the measured HTML report to GitHub Pages, and retains raw predictions and reports
-for 90 days. Unmatched findings are reported separately as valid extras, confirmed
-false positives, uncertain, or not yet adjudicated; sparse labels are not treated
-as perfect ground truth.
+The manual **Live 120-PR Evaluation** workflow retains raw predictions and reports for 90 days and publishes the accepted HTML report to GitHub Pages.
 
----
+</details>
 
-## Installation
+## Security model
 
-```bash
-git clone https://github.com/aayush1234434-stack/Persistent-Code-Review-Agent-.git
-cd Persistent-Code-Review-Agent-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt -r requirements-analysis.txt
-```
+The analysis container is intentionally treated as hostile:
 
-Copy `.env.example` to `.env` and set your secrets before running the API.
+- No network interface beyond loopback
+- No GitHub token, OpenAI key, or dashboard secret
+- Unique unprivileged UID for each review request
+- CPU, memory, file-size, file-descriptor, process-count, and wall-clock limits
+- Read-only container filesystem with a dedicated shared workspace volume
+- Dropped Linux capabilities for the child process
+- Offline Semgrep rules with telemetry disabled
+- Workspace deletion after analysis unless explicitly retained
 
----
+The sandbox supervisor receives only the capabilities needed to prepare a child-owned workspace. The review command drops privileges before executing repository code.
 
-## Usage
-
-Run the test suite (LLM is mocked automatically; no `OPENAI_API_KEY` required):
-
-```bash
-pytest -q
-```
-
-Run benchmark cases (deterministic rules, ranking, grounding verifier, merge decision):
-
-```bash
-python benchmarks/pr_review_benchmark.py
-```
-
-CI runs both `pytest` and the benchmark script on every push/PR via GitHub Actions.
-
-Run the FastAPI service:
-
-```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-The service applies SQL migrations during startup. By default it also runs one
-embedded review worker. For separate web and worker processes, set
-`REVIEW_WORKER_ENABLED=false` on the web process and run:
-
-```bash
-python worker.py
-```
-
-Webhook requests return only after the GitHub delivery is stored in
-`review_jobs`. A worker claims jobs with a renewable lease; interrupted jobs
-become claimable again after `REVIEW_JOB_LEASE_SECONDS`.
-
-Local mode builds the repository map and runs static tools, but does not execute
-repository tests unless `REVIEW_ALLOW_LOCAL_TEST_EXECUTION=true`. Production
-requires `REVIEW_SANDBOX_MODE=filesystem`; the Docker Compose setup configures
-this automatically.
-
----
-
-## Run with Docker
-
-```bash
-docker compose up --build
-```
-
-The CI `docker-recovery` job also runs the destructive integration scenarios:
-
-```bash
-docker compose up --build -d db sandbox
-python scripts/test_postgres_restart_recovery.py
-docker compose run --rm worker python scripts/test_sandbox_roundtrip.py
-docker compose down --volumes --remove-orphans
-```
-
-These verify PostgreSQL lease recovery after a database restart and a real
-shared-volume sandbox round trip with loopback-only networking and resource
-limits. They require a running Docker daemon.
-
----
-
-## Project Structure
+## Project map
 
 ```text
-agent.py              # Core agent logic
-main.py               # FastAPI app and GitHub webhook handling
-review_queue.py       # Durable queue, leases, retries, and migrations
-review_intelligence.py # Checkout, repository map, tool parsing, evidence data
-sandbox_service.py    # No-network, resource-limited analysis executor
-semgrep-rules.yml     # Offline Semgrep policy (no runtime rule download)
-worker.py             # Standalone worker entry point
-dashboard.html        # Review dashboard
-benchmarks/           # Benchmark cases
-evaluation.py         # Quality, calibration, latency, cost, and acceptance metrics
-tests/                # Unit and API integration tests
-migrations/           # Database schema
-.github/workflows/    # CI pipeline
-docs/                 # GitHub Pages demo, report, and architecture diagram
-scripts/              # Docker/PostgreSQL recovery integration checks
+.
+├── main.py                    # FastAPI service, webhooks, review API
+├── worker.py                  # Standalone durable worker
+├── agent.py                   # Review graph, prompts, ranking, grounding
+├── review_queue.py            # PostgreSQL jobs, leases, retries, migrations
+├── review_intelligence.py     # Checkout, symbol map, tools, evidence
+├── sandbox_service.py         # No-network command supervisor
+├── evaluation.py              # Quality, calibration, latency, cost metrics
+├── dashboard.html             # Human review dashboard
+├── migrations/                # Versioned PostgreSQL schema
+├── benchmarks/                # Fast and 120-case evaluation suites
+├── scripts/                   # Recovery and isolation integration checks
+├── tests/                     # Unit and API tests
+├── docs/                      # Product preview, architecture, report
+└── .github/workflows/         # CI, live evaluation, GitHub Pages
 ```
 
----
+## API highlights
 
-## Reliability Model
+| Endpoint | Purpose |
+|---|---|
+| `GET /reviews` | List review runs |
+| `GET /reviews/{id}` | Inspect a review and its findings |
+| `GET /reviews/{id}/history` | Compare review versions |
+| `GET /reviews/{id}/manager-summary` | Retrieve the manager-focused summary |
+| `POST /reviews/{id}/rerun-latest` | Queue the latest PR commit |
+| `POST /reviews/{id}/approve` | Transactionally approve a review |
+| `POST /reviews/{id}/findings/{index}/feedback` | Record finding feedback |
+| `GET /evaluation/metrics` | Aggregate latency, cost, and acceptance |
 
-- GitHub delivery IDs are unique idempotency keys. If GitHub omits one, the
-  signed payload hash is used.
-- `(repo, PR number, source SHA)` uniquely identifies one review version.
-- Workers use `FOR UPDATE SKIP LOCKED`, renewable leases, and bounded
-  exponential backoff.
-- A process can stop at any point; an unfinished job is recovered when its
-  lease expires.
-- Production startup fails when migrations or LangGraph PostgreSQL persistence
-  are unavailable, or when an isolated analysis backend is not configured.
+## Current roadmap
 
-## Review Intelligence and Isolation
-
-For each review version, the worker fetches only the PR head SHA into a unique
-workspace. It maps changed symbols, direct importers, and callers, then limits
-analysis to that impacted scope. The sandbox container has no network, runs
-repository commands as a unique unprivileged per-review UID, receives no
-GitHub/OpenAI secrets, and applies
-CPU, memory, file-size, process-count, and wall-clock limits. Workspaces are
-deleted after analysis unless `REVIEW_RETAIN_SANDBOX=true`.
-
-Static findings are accepted only when they point to a changed file and survive
-the changed-line grounding verifier. Test output and SAST results are attached
-as corroborating evidence; they do not bypass diff grounding.
-
-## Developer Experience
-
-Each grounded finding includes its lifecycle, evidence, and a concise explanation
-of operational impact. When the model or a static tool provides an exact bounded
-replacement, the inline GitHub comment includes a native `suggestion` block that
-developers can apply directly. Dismissed findings are persisted as reviewer
-feedback, carried forward across review versions, excluded from merge decisions,
-and omitted from inline publishing.
-
-Every completed analysis also stores:
-
-- A file-level weighted risk heatmap
-- A comparison with the prior analyzed PR version
-- Counts of new, recurring, fixed, and dismissed findings
-- A manager summary covering scope, tests, priority risks, and risk direction
-
-The dashboard’s **Review New Commits** action checks GitHub’s current PR head and
-durably queues a new version only when the SHA changed. The same manager payload
-is available from `GET /reviews/{id}/manager-summary`.
-
-The public product preview is available from `docs/index.html`, with the
-architecture diagram in `docs/architecture.svg`. The `pages.yml` workflow
-publishes the demo on pushes to `main`; the manual live-evaluation workflow
-replaces the report placeholder with measured results after credentials are
-configured. Demo cards are explicitly labelled illustrative until that run.
-
-## Evaluation and Trust
-
-Every analyzed review stores `evaluation_metrics` alongside its result:
-
-- End-to-end time to review
-- Estimated LLM cost from token usage and configured model pricing
-- Exact prompt fingerprint and active model-policy fingerprint
-- The triage, review, and strong-model policy used for that review
-
-`GET /evaluation/metrics` aggregates production p50/p95 latency, cost per PR,
-overall human acceptance, and acceptance by category. Prometheus also exports
-review-time, per-review cost, and finding-feedback series. The dashboard shows
-the production summary; benchmark-only metrics such as recall and calibration
-stay in the versioned evaluation report because production reviews have no
-complete ground-truth label set.
-
-CI hashes the actual prompt-building functions and structured schemas, plus the
-default model policy. A prompt, schema, or model-policy change therefore fails
-the evaluation-contract check until a maintainer runs the 120-case suite,
-reviews the category-level regressions, and explicitly accepts a new contract.
-
-## Future Improvements
-
-- Run and publish the authenticated 120-case baseline, including human review of
-  judge-adjudicated extras
-- Add parser adapters for additional languages and dependency ecosystems
-- Add a hosted review history with organization-level benchmark trends
-
----
-
-## Why This Matters
-
-This project demonstrates:
-
-- System design for AI agents
-- Code analysis pipelines
-- Structured output generation
-- Real-world problem solving
-
----
+- Publish the first accepted authenticated 120-case model-quality baseline
+- Add deeper parser adapters and dependency-ecosystem intelligence
+- Add hosted organization-level review history and benchmark trends
 
 ## Author
 
-Aayush Singh
+Built by **Aayush Singh**.
+
+If this project is useful, consider starring the repository or opening an issue with a real review scenario you would like added to the benchmark.
