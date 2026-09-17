@@ -102,7 +102,11 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      # The supervisor prepares a child-owned 0700 workspace before setuid.
+      # The child process loses these capabilities when privileges are dropped.
       - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
       - SETGID
       - SETUID
       - KILL

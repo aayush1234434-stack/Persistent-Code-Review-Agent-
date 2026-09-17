@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 import agent
 from review_intelligence import (
@@ -26,6 +27,24 @@ def test_production_requires_filesystem_sandbox():
 
     with pytest.raises(RuntimeError, match="isolated filesystem sandbox"):
         config.validate(production=True, worker_enabled=True)
+
+
+def test_compose_sandbox_supervisor_has_only_required_workspace_capabilities():
+    compose_path = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+    sandbox = yaml.safe_load(compose_path.read_text())["services"]["sandbox"]
+
+    assert sandbox["network_mode"] == "none"
+    assert sandbox["read_only"] is True
+    assert sandbox["cap_drop"] == ["ALL"]
+    assert set(sandbox["cap_add"]) == {
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "KILL",
+        "SETGID",
+        "SETUID",
+    }
+    assert "no-new-privileges:true" in sandbox["security_opt"]
 
 
 def test_symbol_map_limits_review_to_changed_files_and_callers(tmp_path):
