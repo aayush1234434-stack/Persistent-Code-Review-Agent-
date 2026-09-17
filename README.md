@@ -53,6 +53,7 @@ PR webhook -> durable queue -> isolated checkout
 - Transaction-safe human decisions and finding feedback
 - Per-PR detached checkout in a network-isolated analysis container
 - Python symbol, import, reverse-dependency, and caller mapping
+- Cross-language repository intelligence for Python, JavaScript/TypeScript, Go, Java, and Rust
 - Impacted-file linting and SAST with Ruff, Bandit, and offline Semgrep rules
 - Targeted pytest execution with bounded resources and timeouts
 - Finding corroboration from changed lines, static evidence, and execution output
@@ -125,17 +126,26 @@ latency, cost, and acceptance report:
 python benchmarks/run_live_benchmark.py \
   --output benchmark-results/predictions.jsonl
 
-python benchmarks/evaluate.py \
+python benchmarks/adjudicate_sparse_labels.py \
   --predictions benchmark-results/predictions.jsonl \
+  --output benchmark-results/adjudicated-predictions.jsonl
+
+python benchmarks/evaluate.py \
+  --predictions benchmark-results/adjudicated-predictions.jsonl \
   --contract benchmarks/baselines/evaluation_contract.v1.json \
   --output-json benchmark-results/report.json \
-  --output-markdown benchmark-results/report.md
+  --output-markdown benchmark-results/report.md \
+  --output-html docs/benchmark-report.html
 ```
 
 The checked-in baseline is deliberately marked `contract_only` until the first
 full live run is accepted; it does not pretend that bootstrap or oracle
 predictions are model results. The manual **Live 120-PR Evaluation** workflow
-runs the complete suite and retains its raw predictions and reports for 90 days.
+runs the complete suite, independently adjudicates unmatched findings, publishes
+the measured HTML report to GitHub Pages, and retains raw predictions and reports
+for 90 days. Unmatched findings are reported separately as valid extras, confirmed
+false positives, uncertain, or not yet adjudicated; sparse labels are not treated
+as perfect ground truth.
 
 ---
 
@@ -200,6 +210,19 @@ this automatically.
 docker compose up --build
 ```
 
+The CI `docker-recovery` job also runs the destructive integration scenarios:
+
+```bash
+docker compose up --build -d db sandbox
+python scripts/test_postgres_restart_recovery.py
+docker compose run --rm worker python scripts/test_sandbox_roundtrip.py
+docker compose down --volumes --remove-orphans
+```
+
+These verify PostgreSQL lease recovery after a database restart and a real
+shared-volume sandbox round trip with loopback-only networking and resource
+limits. They require a running Docker daemon.
+
 ---
 
 ## Project Structure
@@ -218,6 +241,8 @@ evaluation.py         # Quality, calibration, latency, cost, and acceptance metr
 tests/                # Unit and API integration tests
 migrations/           # Database schema
 .github/workflows/    # CI pipeline
+docs/                 # GitHub Pages demo, report, and architecture diagram
+scripts/              # Docker/PostgreSQL recovery integration checks
 ```
 
 ---
@@ -268,6 +293,12 @@ The dashboard’s **Review New Commits** action checks GitHub’s current PR hea
 durably queues a new version only when the SHA changed. The same manager payload
 is available from `GET /reviews/{id}/manager-summary`.
 
+The public product preview is available from `docs/index.html`, with the
+architecture diagram in `docs/architecture.svg`. The `pages.yml` workflow
+publishes the demo on pushes to `main`; the manual live-evaluation workflow
+replaces the report placeholder with measured results after credentials are
+configured. Demo cards are explicitly labelled illustrative until that run.
+
 ## Evaluation and Trust
 
 Every analyzed review stores `evaluation_metrics` alongside its result:
@@ -291,9 +322,10 @@ reviews the category-level regressions, and explicitly accepts a new contract.
 
 ## Future Improvements
 
-- More advanced LLM-based analysis
-- Multi-agent review system
-- Language-aware maps beyond Python/JavaScript and dependency-manager caching
+- Run and publish the authenticated 120-case baseline, including human review of
+  judge-adjudicated extras
+- Add parser adapters for additional languages and dependency ecosystems
+- Add a hosted review history with organization-level benchmark trends
 
 ---
 

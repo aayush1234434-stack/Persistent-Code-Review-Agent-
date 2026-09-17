@@ -1,5 +1,10 @@
 name: Live 120-PR Evaluation
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,9 +16,16 @@ on:
         description: Strong model
         required: false
         default: gpt-4o
+      judge_model:
+        description: Independent sparse-label adjudication model
+        required: false
+        default: gpt-4.1
 
 jobs:
   evaluate:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -21,6 +33,7 @@ jobs:
       OPENAI_REVIEW_MODEL: ${{ inputs.review_model }}
       OPENAI_TRIAGE_MODEL: gpt-4o-mini
       OPENAI_STRONG_REVIEW_MODEL: ${{ inputs.strong_model }}
+      OPENAI_JUDGE_MODEL: ${{ inputs.judge_model }}
 
     steps:
       - uses: actions/checkout@v4
@@ -39,13 +52,20 @@ jobs:
           python benchmarks/run_live_benchmark.py
           --output benchmark-results/predictions.jsonl
 
+      - name: Adjudicate unmatched sparse-label findings
+        run: >-
+          python benchmarks/adjudicate_sparse_labels.py
+          --predictions benchmark-results/predictions.jsonl
+          --output benchmark-results/adjudicated-predictions.jsonl
+
       - name: Score and enforce regression thresholds
         run: >-
           python benchmarks/evaluate.py
-          --predictions benchmark-results/predictions.jsonl
+          --predictions benchmark-results/adjudicated-predictions.jsonl
           --contract benchmarks/baselines/evaluation_contract.v1.json
           --output-json benchmark-results/report.json
           --output-markdown benchmark-results/report.md
+          --output-html docs/benchmark-report.html
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -53,3 +73,11 @@ jobs:
           name: pr-review-evaluation
           path: benchmark-results/
           retention-days: 90
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Publish measured benchmark report
+        id: deployment
+        uses: actions/deploy-pages@v4

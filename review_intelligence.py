@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-SUPPORTED_SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java"}
+SUPPORTED_SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".rs"}
 MAX_COMMAND_OUTPUT = 200_000
 
 
@@ -210,27 +210,179 @@ def _python_file_facts(path: Path, relative: str) -> dict[str, Any]:
     }
 
 
-IMPORT_RE = re.compile(r"(?:from\s+['\"]([^'\"]+)['\"]|require\(['\"]([^'\"]+)['\"]\))")
-FUNCTION_RE = re.compile(
+CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
+CALL_KEYWORDS = {
+    "catch", "class", "def", "else", "except", "for", "func", "function", "if",
+    "interface", "match", "new", "return", "struct", "switch", "trait", "while",
+}
+
+
+def _calls_from_text(text: str) -> list[dict[str, Any]]:
+    calls = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        for name in CALL_RE.findall(line):
+            if name not in CALL_KEYWORDS:
+                calls.append({"name": name, "line": line_number})
+    return calls[:1000]
+
+
+JS_IMPORT_RE = re.compile(
+    r"(?:from\s+['\"]([^'\"]+)['\"]|require\(\s*['\"]([^'\"]+)['\"]\s*\)|import\(\s*['\"]([^'\"]+)['\"]\s*\))"
+)
+JS_FUNCTION_RE = re.compile(
     r"(?:function\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(?)"
 )
+JS_CLASS_RE = re.compile(r"\bclass\s+([A-Za-z_$][\w$]*)")
+
+
+def _javascript_file_facts(path: Path, relative: str) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    imports = [next(part for part in match if part) for match in JS_IMPORT_RE.findall(text)]
+    symbols = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        function = JS_FUNCTION_RE.search(line)
+        if function:
+            symbols.append({"name": function.group(1) or function.group(2), "kind": "function", "line": line_number})
+        class_match = JS_CLASS_RE.search(line)
+        if class_match:
+            symbols.append({"name": class_match.group(1), "kind": "class", "line": line_number})
+    return {
+        "file": relative,
+        "language": "typescript" if path.suffix.lower() in {".ts", ".tsx"} else "javascript",
+        "symbols": symbols[:500],
+        "imports": sorted(set(imports))[:500],
+        "calls": _calls_from_text(text),
+    }
+
+
+GO_IMPORT_RE = re.compile(r'^\s*import\s+(?:[A-Za-z_.]+\s+)?["`]([^"`]+)["`]', re.MULTILINE)
+GO_IMPORT_BLOCK_RE = re.compile(r"\bimport\s*\((.*?)\)", re.DOTALL)
+GO_BLOCK_PATH_RE = re.compile(r'(?:^|\s)(?:[A-Za-z_.]+\s+)?["`]([^"`]+)["`]')
+GO_FUNCTION_RE = re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(")
+GO_TYPE_RE = re.compile(r"^\s*type\s+([A-Za-z_]\w*)\s+(struct|interface)\b")
+
+
+def _go_file_facts(path: Path, relative: str) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    imports = set(GO_IMPORT_RE.findall(text))
+    for block in GO_IMPORT_BLOCK_RE.findall(text):
+        imports.update(GO_BLOCK_PATH_RE.findall(block))
+    symbols = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        function = GO_FUNCTION_RE.search(line)
+        if function:
+            symbols.append({"name": function.group(1), "kind": "function", "line": line_number})
+        type_match = GO_TYPE_RE.search(line)
+        if type_match:
+            symbols.append({"name": type_match.group(1), "kind": type_match.group(2), "line": line_number})
+    return {
+        "file": relative,
+        "language": "go",
+        "symbols": symbols[:500],
+        "imports": sorted(imports)[:500],
+        "calls": _calls_from_text(text),
+    }
+
+
+JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w.*]+)\s*;", re.MULTILINE)
+JAVA_TYPE_RE = re.compile(r"\b(class|interface|enum|record)\s+([A-Za-z_]\w*)")
+JAVA_METHOD_RE = re.compile(
+    r"^\s*(?:public|protected|private|static|final|synchronized|abstract|native|default|\s)+"
+    r"(?:<[\w, ? extends super]+>\s+)?[\w<>\[\],.?]+\s+([A-Za-z_]\w*)\s*\([^;]*\)\s*(?:throws\s+[^{]+)?\{?"
+)
+
+
+def _java_file_facts(path: Path, relative: str) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    symbols = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        type_match = JAVA_TYPE_RE.search(line)
+        if type_match:
+            symbols.append({"name": type_match.group(2), "kind": type_match.group(1), "line": line_number})
+        method = JAVA_METHOD_RE.search(line)
+        if method and method.group(1) not in CALL_KEYWORDS:
+            symbols.append({"name": method.group(1), "kind": "method", "line": line_number})
+    return {
+        "file": relative,
+        "language": "java",
+        "symbols": symbols[:500],
+        "imports": sorted(set(JAVA_IMPORT_RE.findall(text)))[:500],
+        "calls": _calls_from_text(text),
+    }
+
+
+RUST_IMPORT_RE = re.compile(r"^\s*(?:use|mod)\s+([^;{]+)", re.MULTILINE)
+RUST_SYMBOL_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(fn|struct|enum|trait)\s+([A-Za-z_]\w*)")
+
+
+def _rust_file_facts(path: Path, relative: str) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    symbols = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        match = RUST_SYMBOL_RE.search(line)
+        if match:
+            symbols.append({"name": match.group(2), "kind": match.group(1), "line": line_number})
+    imports = [value.strip().replace("::", ".") for value in RUST_IMPORT_RE.findall(text)]
+    return {
+        "file": relative,
+        "language": "rust",
+        "symbols": symbols[:500],
+        "imports": sorted(set(imports))[:500],
+        "calls": _calls_from_text(text),
+    }
 
 
 def _generic_file_facts(path: Path, relative: str) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    imports = [left or right for left, right in IMPORT_RE.findall(text)]
-    symbols = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        match = FUNCTION_RE.search(line)
-        if match:
-            symbols.append({"name": match.group(1) or match.group(2), "kind": "function", "line": line_number})
     return {
         "file": relative,
         "language": path.suffix.lstrip(".") or "unknown",
-        "symbols": symbols[:500],
-        "imports": imports[:500],
-        "calls": [],
+        "symbols": [],
+        "imports": [],
+        "calls": _calls_from_text(text),
     }
+
+
+def _source_file_facts(path: Path, relative: str) -> dict[str, Any]:
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return _python_file_facts(path, relative)
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        return _javascript_file_facts(path, relative)
+    if suffix == ".go":
+        return _go_file_facts(path, relative)
+    if suffix == ".java":
+        return _java_file_facts(path, relative)
+    if suffix == ".rs":
+        return _rust_file_facts(path, relative)
+    return _generic_file_facts(path, relative)
+
+
+def _import_matches_changed_file(importer: str, imported: str, changed_path: str) -> bool:
+    raw = imported.strip().replace("::", ".").replace("/", ".")
+    raw = re.sub(r"\.(?:js|jsx|ts|tsx|py|go|java|rs)$", "", raw)
+    changed_module = _module_name(changed_path)
+    changed_stem = Path(changed_path).stem
+    changed_parent = Path(changed_path).parent.as_posix().replace("/", ".")
+    if imported.startswith("."):
+        importer_parent = Path(importer).parent
+        resolved = (importer_parent / imported).as_posix()
+        normalized_parts = []
+        for part in resolved.split("/"):
+            if part == "..":
+                if normalized_parts:
+                    normalized_parts.pop()
+            elif part not in {"", "."}:
+                normalized_parts.append(part)
+        raw = _module_name("/".join(normalized_parts))
+    candidates = {raw.strip("."), raw.rsplit(".", 1)[-1], changed_module, changed_stem}
+    return (
+        raw == changed_module
+        or raw.endswith(f".{changed_stem}")
+        or (changed_parent and raw.endswith(changed_parent))
+        or changed_module.endswith(f".{raw.rsplit('.', 1)[-1]}")
+        or changed_stem in candidates and raw.rsplit(".", 1)[-1] == changed_stem
+    )
 
 
 def build_symbol_dependency_map(
@@ -246,13 +398,9 @@ def build_symbol_dependency_map(
             continue
         relative = relative_path.as_posix()
         full_path = checkout / relative_path
-        if relative_path.suffix.lower() == ".py":
-            facts[relative] = _python_file_facts(full_path, relative)
-        else:
-            facts[relative] = _generic_file_facts(full_path, relative)
+        facts[relative] = _source_file_facts(full_path, relative)
 
     changed = [path for path in changed_files if path in facts]
-    changed_modules = {_module_name(path) for path in changed}
     changed_symbol_names = {
         symbol["name"]
         for path in changed
@@ -266,11 +414,9 @@ def build_symbol_dependency_map(
             continue
         imports = set(file_facts.get("imports", []))
         if any(
-            imported == module
-            or imported.endswith(f".{module.split('.')[-1]}")
-            or module.endswith(f".{imported.split('.')[-1]}")
+            _import_matches_changed_file(path, imported, changed_path)
             for imported in imports
-            for module in changed_modules
+            for changed_path in changed
         ):
             reverse_dependencies.append(path)
         matching_calls = [

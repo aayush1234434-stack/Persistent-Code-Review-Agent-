@@ -78,6 +78,59 @@ def test_composite_prediction_category_matches_specific_ground_truth_category():
     assert unexpected == []
 
 
+def test_sparse_label_adjudication_separates_valid_extras_from_false_positives():
+    report = evaluation.evaluate_cases(
+        [{"id": "one", "labels": [{"id": "label-1", "category": "logic", "file": "app.py"}]}],
+        [{
+            "case_id": "one",
+            "findings": [
+                {"category": "logic", "file": "app.py", "confidence": 0.9},
+                {
+                    "category": "security", "file": "app.py", "confidence": 0.8,
+                    "benchmark_adjudication": {"verdict": "valid_extra"},
+                },
+                {
+                    "category": "tests", "file": "app.py", "confidence": 0.7,
+                    "benchmark_adjudication": {"verdict": "false_positive"},
+                },
+                {
+                    "category": "contract", "file": "app.py", "confidence": 0.6,
+                    "benchmark_adjudication": {"verdict": "uncertain"},
+                },
+            ],
+        }],
+    )
+
+    assert report["false_positive_rate"] == 0.75
+    adjudicated = report["sparse_label_adjudication"]
+    assert adjudicated["valid_unlabeled"] == 1
+    assert adjudicated["confirmed_false_positives"] == 1
+    assert adjudicated["uncertain"] == 1
+    assert adjudicated["unadjudicated"] == 0
+    assert adjudicated["coverage"] == 1.0
+    assert adjudicated["precision"] == pytest.approx(2 / 3, abs=1e-6)
+    assert adjudicated["false_positive_rate"] == pytest.approx(1 / 3, abs=1e-6)
+
+
+def test_sparse_label_adjudicator_can_recover_a_strict_unmatched_label():
+    report = evaluation.evaluate_cases(
+        [{"id": "one", "labels": [{"id": "label-1", "category": "security", "file": "app.py", "line": 40}]}],
+        [{
+            "case_id": "one",
+            "findings": [{
+                "category": "security", "file": "app.py", "line": 10, "confidence": 0.8,
+                "benchmark_adjudication": {
+                    "verdict": "matches_label", "matched_label_id": "label-1",
+                },
+            }],
+        }],
+    )
+
+    assert report["tp"] == 1
+    assert report["fp"] == 0
+    assert report["fn"] == 0
+
+
 def test_production_metrics_use_only_recorded_telemetry_and_feedback():
     metrics = evaluation.production_metrics([
         {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import sys
 from pathlib import Path
@@ -94,6 +95,9 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"| Mean review time (ms) | {report['time_to_review_ms']['mean'] if report['time_to_review_ms']['mean'] is not None else 'n/a'} |",
         f"| Mean cost / PR (USD) | {report['cost_per_pr_usd']['mean'] if report['cost_per_pr_usd']['mean'] is not None else 'n/a'} |",
         f"| Expected calibration error | {report['calibration']['expected_calibration_error'] if report['calibration']['expected_calibration_error'] is not None else 'n/a'} |",
+        f"| Adjudicated precision | {report['sparse_label_adjudication']['precision'] if report['sparse_label_adjudication']['precision'] is not None else 'n/a'} |",
+        f"| Confirmed false-positive rate | {report['sparse_label_adjudication']['false_positive_rate'] if report['sparse_label_adjudication']['false_positive_rate'] is not None else 'n/a'} |",
+        f"| Sparse-label adjudication coverage | {report['sparse_label_adjudication']['coverage']:.3f} |",
         "",
         "## Category quality",
         "",
@@ -122,6 +126,42 @@ def markdown_report(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def html_report(report: dict[str, Any]) -> str:
+    categories = "".join(
+        "<tr>"
+        f"<td>{html.escape(category)}</td><td>{values['tp']}</td><td>{values['fp']}</td><td>{values['fn']}</td>"
+        f"<td>{values['precision']:.3f}</td><td>{values['recall']:.3f}</td><td>{values['f1']:.3f}</td>"
+        "</tr>"
+        for category, values in report["by_category"].items()
+    )
+    calibration = "".join(
+        "<tr>"
+        f"<td>{point['lower']:.1f}–{point['upper']:.1f}</td><td>{point['count']}</td>"
+        f"<td>{point['average_confidence'] if point['average_confidence'] is not None else 'n/a'}</td>"
+        f"<td>{point['empirical_accuracy'] if point['empirical_accuracy'] is not None else 'n/a'}</td>"
+        f"<td>{point['gap'] if point['gap'] is not None else 'n/a'}</td>"
+        "</tr>"
+        for point in report["calibration"]["points"]
+    )
+    adjudicated = report["sparse_label_adjudication"]
+    provenance = report["provenance"]
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PR Review Evaluation Report</title><style>
+body{{max-width:1100px;margin:50px auto;padding:0 24px;background:#07111f;color:#eaf4ff;font:15px/1.5 system-ui}}a{{color:#38bdf8}}
+.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}}.card{{background:#0e1d30;border:1px solid #29425d;border-radius:12px;padding:18px}}
+.card b{{display:block;font-size:26px;color:#6ee7d5}}table{{width:100%;border-collapse:collapse;background:#0e1d30}}th,td{{padding:10px;border:1px solid #29425d;text-align:right}}th:first-child,td:first-child{{text-align:left}}code{{color:#8eddf7}}@media(max-width:760px){{.grid{{grid-template-columns:1fr 1fr}}}}
+</style></head><body><a href="index.html">← Product demo</a><h1>Real-world PR evaluation</h1>
+<p>Measured across {report['evaluated_case_count']} of {report['case_count']} pinned public pull-request cases.</p>
+<div class="grid"><div class="card">Precision<b>{report['precision']:.3f}</b></div><div class="card">Recall<b>{report['recall']:.3f}</b></div><div class="card">F1<b>{report['f1']:.3f}</b></div><div class="card">Strict FPR<b>{report['false_positive_rate']:.3f}</b></div></div>
+<h2>Sparse-label adjudication</h2><div class="grid"><div class="card">Adjudicated precision<b>{adjudicated['precision'] if adjudicated['precision'] is not None else 'n/a'}</b></div><div class="card">Confirmed FPR<b>{adjudicated['false_positive_rate'] if adjudicated['false_positive_rate'] is not None else 'n/a'}</b></div><div class="card">Valid extras<b>{adjudicated['valid_unlabeled']}</b></div><div class="card">Coverage<b>{adjudicated['coverage']:.3f}</b></div></div>
+<h2>Quality by category</h2><table><thead><tr><th>Category</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead><tbody>{categories}</tbody></table>
+<h2>Confidence calibration</h2><p>ECE: <b>{report['calibration']['expected_calibration_error']}</b> · Brier score: <b>{report['calibration']['brier_score']}</b></p><table><thead><tr><th>Bin</th><th>N</th><th>Confidence</th><th>Accuracy</th><th>Gap</th></tr></thead><tbody>{calibration}</tbody></table>
+<h2>Efficiency and trust</h2><div class="grid"><div class="card">P50 time (ms)<b>{report['time_to_review_ms']['p50'] or 'n/a'}</b></div><div class="card">P95 time (ms)<b>{report['time_to_review_ms']['p95'] or 'n/a'}</b></div><div class="card">Mean cost / PR<b>{report['cost_per_pr_usd']['mean'] or 'n/a'}</b></div><div class="card">Human acceptance<b>{report['human_acceptance_rate'] if report['human_acceptance_rate'] is not None else 'n/a'}</b></div></div>
+<h2>Reproducibility</h2><p><code>Corpus {html.escape(report['corpus_fingerprint'])}</code><br><code>Prompt {html.escape(provenance['prompt_fingerprint'])}</code><br><code>Model policy {html.escape(provenance['model_policy_fingerprint'])}</code><br><code>Pricing {html.escape(provenance['pricing_version'])}</code></p>
+</body></html>"""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus", type=Path, default=Path(__file__).parent / "corpus" / "real_world_prs.v1.jsonl")
@@ -129,6 +169,7 @@ def main() -> int:
     parser.add_argument("--contract", type=Path)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-markdown", type=Path)
+    parser.add_argument("--output-html", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
 
@@ -172,6 +213,9 @@ def main() -> int:
     if args.output_markdown:
         args.output_markdown.parent.mkdir(parents=True, exist_ok=True)
         args.output_markdown.write_text(markdown_report(report))
+    if args.output_html:
+        args.output_html.parent.mkdir(parents=True, exist_ok=True)
+        args.output_html.write_text(html_report(report))
     return 0 if not failures else 1
 
 
