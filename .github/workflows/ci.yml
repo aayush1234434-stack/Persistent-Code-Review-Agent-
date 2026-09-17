@@ -56,8 +56,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Install database test dependency
-        run: pip install asyncpg prometheus-client
+      - name: Install project dependencies for recovery integration
+        run: pip install -r requirements.txt
 
       - name: Build and start real PostgreSQL and isolated sandbox
         run: docker compose up --build -d db sandbox
