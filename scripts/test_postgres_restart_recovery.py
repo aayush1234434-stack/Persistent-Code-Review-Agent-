@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
 import asyncpg
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from review_queue import claim_review_job, complete_review_job, enqueue_review_job, run_migrations
 
-ROOT = Path(__file__).resolve().parents[1]
 DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://pr_user:pr_pass@127.0.0.1:5432/pr_review",
